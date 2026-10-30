@@ -43,7 +43,7 @@ if kts and "keystoreProps" not in s:
     s = s.replace("android {", 'val keystoreProps = Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
     s = s.replace("    buildTypes {", '''    signingConfigs {
         create("release") {
-            if (keystoreProps.size() > 0) {
+            if (keystoreProps.size > 0) {
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
                 storeFile = file(keystoreProps.getProperty("storeFile"))
@@ -54,7 +54,7 @@ if kts and "keystoreProps" not in s:
 
     buildTypes {''', 1)
     s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.size() > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+                  'signingConfig = if (keystoreProps.size > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
 open(path, "w").write(s)
 print("patched", path)
 PY
