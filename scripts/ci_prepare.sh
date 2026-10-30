@@ -37,21 +37,24 @@ if "fileTree" not in s:
           if kts else "\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])\n}\n")
 # release signing from key.properties (kts only)
 if kts and "keystoreProps" not in s:
-    s = s.replace("android {", 'val keystoreProps = java.util.Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
+    if "import java.util.Properties" not in s:
+        s = "import java.util.Properties\n\n" + s
+
+    s = s.replace("android {", 'val keystoreProps = Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
     s = s.replace("    buildTypes {", '''    signingConfigs {
         create("release") {
-            if (keystoreProps.isNotEmpty()) {
-                keyAlias = keystoreProps["keyAlias"] as String
-                keyPassword = keystoreProps["keyPassword"] as String
-                storeFile = file(keystoreProps["storeFile"] as String)
-                storePassword = keystoreProps["storePassword"] as String
+            if (keystoreProps.size() > 0) {
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
             }
         }
     }
 
     buildTypes {''', 1)
     s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+                  'signingConfig = if (keystoreProps.size() > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
 open(path, "w").write(s)
 print("patched", path)
 PY
