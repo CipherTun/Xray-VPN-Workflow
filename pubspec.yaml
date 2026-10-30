@@ -1,19 +1,43 @@
 name: vpn
-description: XRay Vpn - multi-protocol tunnel client (SSH, HTTP payload, Xray, Hysteria2, WireGuard, OpenVPN, HTTP/SOCKS proxy).
-publish_to: "none"
-version: 4.0.0+5
+description: XRay VPN - TUN-mode VPN client powered by Xray-core and DartSSH2.
+publish_to: none
+version: 1.1.0+2
 
 environment:
-  sdk: ">=3.5.0 <4.0.0"
+  sdk: ">=3.4.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  flutter_v2ray_client: ^3.5.0
-  dartssh2: ^4.1.0
-  openvpn_flutter: ^2.0.0
-  shared_preferences: ^2.5.0
-  crypto: ^3.0.3
+  dartssh2: ^4.1.0          # latest on pub.dev when this was written
+  provider: ^6.1.2
+  shared_preferences: ^2.3.2
+  google_fonts: ^6.2.1
+  flutter_colorpicker: ^1.1.0
+  permission_handler: ^11.3.1
+  cryptography: ^2.7.0       # AES-256-GCM + PBKDF2 for shared config packages
+  crypto: ^3.0.5             # SHA-256 (device ID, PIN)
+  share_plus: ^10.1.4
+  path_provider: ^2.1.5
+  file_picker: ^8.1.6
+  qr_flutter: ^4.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.14.1
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/preview.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/icon/icon.png
+  remove_alpha_ios: true
+  adaptive_icon_background: assets/icon/icon_bg.png
+  adaptive_icon_foreground: assets/icon/icon_fg.png
+  adaptive_icon_monochrome: assets/icon/icon_mono.png

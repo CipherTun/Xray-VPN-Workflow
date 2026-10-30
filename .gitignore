@@ -1,11 +1,9 @@
-.dart_tool/
 build/
+.dart_tool/
+.cores/
+android-libs/
 android/
 ios/
-test/
-.flutter-plugins*
-.packages
-pubspec.lock
+dist/
 *.jks
-*.p12
 key.properties

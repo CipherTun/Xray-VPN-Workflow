@@ -1,81 +1,33 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
-import 'app_info.dart';
-import 'controller.dart';
-import 'home_page.dart';
-import 'profiles_page.dart';
-import 'settings_page.dart';
-import 'theme.dart';
-import 'tools_page.dart';
+import 'state/app_state.dart';
+import 'ui/shell.dart';
+import 'ui/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final c = VpnController();
-  await c.init();
-  runApp(XrayApp(c));
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Colors.transparent, systemNavigationBarColor: Colors.transparent));
+  final state = await AppState.create();
+  runApp(ChangeNotifierProvider.value(value: state, child: const XRayApp()));
+  state.onAppStart();
 }
 
-class XrayApp extends StatelessWidget {
-  const XrayApp(this.ctrl, {super.key});
-  final VpnController ctrl;
+class XRayApp extends StatelessWidget {
+  const XRayApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: ctrl,
-      builder: (_, __) => MaterialApp(
-        title: kAppName,
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(Brightness.light),
-        darkTheme: buildTheme(Brightness.dark),
-        themeMode: switch (ctrl.settings.themeMode) {
-          'light' => ThemeMode.light,
-          'system' => ThemeMode.system,
-          _ => ThemeMode.dark,
-        },
-        home: AppShell(ctrl),
-      ),
-    );
-  }
-}
-
-class AppShell extends StatefulWidget {
-  const AppShell(this.ctrl, {super.key});
-  final VpnController ctrl;
-
-  @override
-  State<AppShell> createState() => _AppShellState();
-}
-
-class _AppShellState extends State<AppShell> {
-  int _tab = 0;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = widget.ctrl;
-    return PopScope(
-      canPop: _tab == 0,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) setState(() => _tab = 0);
-      },
-      child: Scaffold(
-        body: IndexedStack(index: _tab, children: [
-          HomePage(ctrl: c, onPickProfile: () => setState(() => _tab = 1)),
-          ProfilesPage(ctrl: c),
-          ToolsPage(ctrl: c),
-          SettingsPage(ctrl: c),
-        ]),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: _tab,
-          onDestinationSelected: (i) => setState(() => _tab = i),
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.shield_outlined), selectedIcon: Icon(Icons.shield), label: 'Home'),
-            NavigationDestination(icon: Icon(Icons.dns_outlined), selectedIcon: Icon(Icons.dns), label: 'Profiles'),
-            NavigationDestination(icon: Icon(Icons.build_circle_outlined), selectedIcon: Icon(Icons.build_circle), label: 'Tools'),
-            NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune), label: 'Settings'),
-          ],
-        ),
-      ),
+    final s = context.watch<AppState>();
+    return MaterialApp(
+      title: 'XRay VPN',
+      debugShowCheckedModeBanner: false,
+      themeMode: s.themeMode,
+      theme: buildTheme(Brightness.light, s.accentFor(Brightness.light)),
+      darkTheme: buildTheme(Brightness.dark, s.accentFor(Brightness.dark)),
+      home: const Shell(),
     );
   }
 }
