@@ -69,11 +69,11 @@ jobs:
 
       - name: Build libXray.aar
         if: steps.aar.outputs.cache-hit != 'true'
-        run: ./scripts/ci_build_libxray.sh
+        run: bash ./scripts/ci_build_libxray.sh
 
       # ── Project scaffolding, icons, geo files ──
       - name: Prepare Flutter project
-        run: ./scripts/ci_prepare.sh
+        run: bash ./scripts/ci_prepare.sh
 
       # ── Signing ──
       # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
