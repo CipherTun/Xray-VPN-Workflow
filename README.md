@@ -1,41 +1,73 @@
-# My Tunnel
+# XRay Vpn
 
-Standalone multi-protocol tunnel client for Android (Flutter). Everything is configured
-by hand in the GUI, or as raw JSON. No dependency on other VPN apps' files.
+Android tunnel client built with Flutter. Package `xyz.xray.vpn`, app name **XRay Vpn**.
 
-## Profiles
-| Type | Configure by |
-|------|--------------|
-| SSH Tunnel | Host, port, user/password or key, optional TLS+SNI, optional HTTP proxy, custom payload, WebSocket framing |
-| V2Ray / Xray / Hysteria2 | Manual form (VLESS, VMess, Trojan, Shadowsocks, Hysteria2, SOCKS; TCP/WS/gRPC/HTTPUpgrade/XHTTP/mKCP; TLS/REALITY), share link, or full Xray JSON |
-| WireGuard | wg-quick config (runs inside the Xray core) |
-| Failover Group | Ordered list of other profiles; next is tried if one fails |
+## Protocols
 
-Profiles can be exported (JSON to clipboard) and re-imported; pasting a standard share link also works.
+| Profile | Engine | Notes |
+|---|---|---|
+| SSH | `dartssh2` 4.x (Dart) | Payload engine, HTTP proxy/CDN hop, TLS/SNI, WebSocket framing, key or password auth |
+| HTTP Payload | Dart (shared payload engine) | HTTP proxy tunnel **without SSH**: payload sent per connection with the destination filled in, relay after 2xx/101 |
+| Xray | `flutter_v2ray_client` 3.5 (Xray 26.9) | VLESS (Reality/Vision), VMess, Trojan, Shadowsocks, Hysteria2 (+ port hopping), raw JSON |
+| WireGuard | Xray WireGuard outbound | wg-quick config |
+| OpenVPN | `openvpn_flutter` 2.0 (ics-openvpn, OpenVPN 2.7) | `.ovpn` with embedded certs, auth-user-pass, key passphrase, per-app bypass |
+| Proxy | Xray outbound | SOCKS5 (UDP capable), HTTP CONNECT, HTTPS (TLS to the proxy), optional auth |
+| Group | App logic | Ordered failover across any of the above |
 
-## Payload tokens
-`[crlf] [cr] [lf] [host] [port] [host_port] [protocol] [ua] [netData]`
-`[random=a,b,c]` random pick, `[rotate=a,b,c]` advances every connection (also valid in SNI).
-`[split]` `[delay_split]` `[instant_split]` send what follows as a new packet.
-SSH order: TCP (proxy or host) -> TLS/SNI -> payload (reply header stripped) -> SSH.
+Modes: **VPN** (whole device) or **Proxy only** (a local SOCKS5 server, no VPN permission, shareable over hotspot).
 
-## Settings
-DNS changer (Google/Cloudflare/Quad9/AdGuard/custom, IPv6 + fallback), auto-reconnect with backoff,
-LAN bypass, per-app bypass (package names), local SOCKS port, SSH keep-alive, hotspot sharing.
+### Payload placeholders
+`[host] [port] [host_port] [crlf] [cr] [lf] [ua] [random] [auth] [rotate=a;b;c] [split] [delay=ms]`
 
-## Tools
-Payload generator, Host checker (TCP/TLS/SNI/payload test), log viewer.
+`[auth]` expands to a full `Proxy-Authorization: Basic ...` line (empty without credentials). `[rotate=...]` cycles per connection. `[split]` and `[delay=ms]` send what follows as a separate write after a pause.
 
-## Servers
-- SSH: any OpenSSH server. TLS mode: put stunnel or nginx `stream` in front. WS mode: a WS->SSH gateway.
-- Hysteria2: official server (https://v2.hysteria.network). Standard Hysteria2 only.
-- Xray: any standard Xray/V2Ray server.
+## Build (GitHub Actions)
 
-## Not included (needs native cores that can't be bundled from Dart)
-DNSTT/SlowDNS, Psiphon, OpenVPN, ZIVPN/UDP Custom (proprietary Hysteria variants), UDP over SSH (udpgw),
-per-profile MTU, "only selected apps" mode.
+Push to `main`, `master` or `dev`. The workflow runs `flutter create --org xyz.xray --project-name vpn`,
+`tools/patch_android.py`, `flutter analyze`, then builds a universal release APK (arm, arm64, x64).
+Flutter is pinned to **3.38.x** (AGP 8). Flutter 3.47 moves to AGP 9, which breaks plugins that still use
+`kotlin-android`; the patch script adds Flutter's documented opt-out flags if a template ever uses AGP 9.
 
-## Build
-Push to GitHub. Actions builds ONE universal APK with armeabi-v7a, arm64-v8a and x86_64
-(Flutter cannot build 32-bit x86 release apps). Download from Actions > run > Artifacts.
-The APK is debug-signed; sign it yourself for store release.
+**Signing:** add repository secrets `RELEASE_KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`
+(and `KEY_PASSWORD` if it differs). Without them the APK is debug-signed with a different key every run,
+so Android refuses to update over the previous build.
+
+```sh
+keytool -genkeypair -keystore xray.p12 -storetype PKCS12 -keyalg RSA -keysize 4096 -validity 10000 -alias xray
+base64 -w0 xray.p12   # paste into RELEASE_KEYSTORE_BASE64
+```
+
+## Not verified yet
+
+Written without a Flutter toolchain: **never compiled or run**. CI `analyze` is the first real check. Watch for:
+
+1. `dartssh2` legacy-algorithm enum names (`ssh_tunnel.dart`, `_algorithms`) and any extra required `SSHSocket` members.
+2. `openvpn_flutter` 2.0 API names used in `controller.dart` (`initialize`, `connect` named arguments, `VpnStatus.speedIn/byteIn`, `VPNStage.isConnected`). Taken from its published docs.
+3. Whether Xray accepts the `servers`/`users` form for the `http`/`socks` outbound (`buildProxyConfig`) and the DNS rules in `applyNetwork`.
+4. `mipmap/ic_stat_vpn` (a vector in the mipmap folder) as the Xray notification icon.
+5. OpenVPN's engine comes from JitPack at build time; the runner needs to reach `jitpack.io`.
+6. `getServerDelay(config:)` and `getConnectedServerDelay(url:)` return values (treated as failure when <= 0 or >= 8000).
+
+## Research notes: what was and was not added
+
+- **Added:** OpenVPN. `flutter_v2ray_client`'s README states it can be used together with `openvpn_flutter`.
+- **Psiphon: not added.** The only Flutter wrapper (`psiphon_mobileproxy`, v0.0.1) needs a config with a propagation channel and sponsor ID issued by Psiphon Inc. (sponsor@psiphon.ca); there is no public one. It also ships `libgojni.so`, which collides with the Xray plugin's native library. If you hold Psiphon credentials, tell me and we can evaluate a separate build. Meanwhile a **Proxy** profile can chain any local Psiphon/Tor proxy exposed by another app.
+- **OpenConnect:** only in `axevpn_flutter`, a very new package (about 440 downloads) that bundles its own V2Ray build and would collide with `flutter_v2ray_client`.
+- **sing-box:** excluded, as requested.
+- **DNSTT/SlowDNS, IKEv2:** no maintained Flutter plugin found that fits.
+
+## Licence note
+
+`openvpn_flutter` and the ics-openvpn engine are **GPL-3.0**. An APK that includes them must be distributed under GPL-compatible terms (source available).
+
+## Fixed from the previous version
+
+SSH self-routing loop, engine dying on Back, DNS in SSH mode, connect/disconnect race, notification-stop reconnect,
+port collision with the core, VLESS TLS default, minSdk and native-lib packaging, debug-key signing, dartssh2 2.22 `flush()` break,
+legacy SSH servers locked out by dartssh2 4.x defaults, WebSocket buffer copying, multi-part payload responses.
+
+## Known limits
+
+- SSH and HTTP Payload carry TCP only. Other UDP is rejected so apps fall back to TCP. UDP over SSH needs `badvpn-udpgw` (protocol must be tested against a live server first).
+- HTTP/HTTPS proxy profiles are TCP only.
+- Per-app "only these apps" mode is not offered for Xray (the plugin exposes only a bypass list).

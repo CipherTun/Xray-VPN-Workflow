@@ -1,17 +1,19 @@
-name: vpn_app
-description: Standalone multi-protocol tunnel client (SSH payload/SNI/WS, Xray, Hysteria2, WireGuard).
+name: vpn
+description: XRay Vpn - multi-protocol tunnel client (SSH, HTTP payload, Xray, Hysteria2, WireGuard, OpenVPN, HTTP/SOCKS proxy).
 publish_to: "none"
-version: 2.0.0+3
+version: 4.0.0+5
 
 environment:
-  sdk: ">=3.4.0 <4.0.0"
+  sdk: ">=3.5.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_v2ray_client: ^3.5.0
-  dartssh2: ^2.9.0
-  shared_preferences: ^2.2.3
+  dartssh2: ^4.1.0
+  openvpn_flutter: ^2.0.0
+  shared_preferences: ^2.5.0
+  crypto: ^3.0.3
 
 flutter:
   uses-material-design: true
