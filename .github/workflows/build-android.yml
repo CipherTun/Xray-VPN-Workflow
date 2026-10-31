@@ -59,10 +59,6 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Install Android SDK 36
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       # ── Xray core (libXray.aar), cached by version ──
       - name: Cache libXray.aar
