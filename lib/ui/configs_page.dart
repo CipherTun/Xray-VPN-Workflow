@@ -311,9 +311,10 @@ class _EditorState extends State<_Editor> {
   late Proto proto = widget.existing?.proto ?? widget.startProto;
   late final Map<String, TextEditingController> t;
   late String net = widget.existing?.p('net', 'tcp') ?? 'tcp';
+  late String transport = widget.existing?.p('transport', 'direct') ?? 'direct';
   late String sec = widget.existing?.p('security', 'none') ?? 'none';
 
-  static const keys = ['name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'method', 'aid', 'sni', 'fp', 'path', 'hostHdr', 'flow', 'pbk', 'sid', 'serviceName'];
+  static const keys = ['name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'method', 'aid', 'sni', 'fp', 'path', 'hostHdr', 'flow', 'pbk', 'sid', 'serviceName', 'proxyHost', 'proxyPort', 'payload'];
 
   @override
   void initState() {
@@ -384,6 +385,13 @@ class _EditorState extends State<_Editor> {
       put('user');
       put('privateKey');
       put('passphrase');
+      params['transport'] = transport;
+      if (transport != 'direct') put('sni');
+      if (transport == 'http') {
+        put('proxyHost');
+        put('proxyPort');
+        put('payload');
+      }
       // keep multi-line keys intact
       if (t['privateKey']!.text.trim().isNotEmpty) params['privateKey'] = t['privateKey']!.text;
     } else {
@@ -426,6 +434,17 @@ class _EditorState extends State<_Editor> {
           _f('id', 'Password', obscure: true),
           _f('privateKey', 'Private key (PEM, optional)', lines: 4),
           _f('passphrase', 'Key passphrase', obscure: true),
+          _chips('Transport', const ['direct', 'tls', 'http'], transport, (v) => transport = v),
+          if (transport == 'tls') _f('sni', 'SNI (blank = server host)'),
+          if (transport == 'http') ...[
+            _f('proxyHost', 'HTTP proxy host (blank = server host)'),
+            _f('proxyPort', 'HTTP proxy port', type: TextInputType.number),
+            _f('payload', 'Payload', lines: 3),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text('Placeholders: [host] [port] [host_port] [crlf] [cr] [lf]. Empty = CONNECT [host_port] HTTP/1.1[crlf]Host: [host][crlf][crlf]. A 200 or 101 reply opens the SSH session.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
+            ),
+          ],
           Text('The first connection trusts the server host key and remembers it. A changed key is refused.', style: TextStyle(color: p.dim, fontSize: 12.5)),
         ] else ...[
           _f('id', proto == Proto.vless || proto == Proto.vmess ? 'UUID' : 'Password'),

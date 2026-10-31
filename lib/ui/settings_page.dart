@@ -1,23 +1,62 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:provider/provider.dart';
 
+import 'package:path_provider/path_provider.dart';
+
 import '../core/accents.dart';
+import '../core/models.dart';
+import '../core/ssh_tunnel.dart';
+import '../core/xray_config.dart';
 import '../state/app_state.dart';
 import 'import_page.dart';
+import 'share_page.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-class SettingsPage extends StatelessWidget {
+
+part 'settings_categories.dart';
+
+class _Cat {
+  const _Cat(this.icon, this.title, this.subtitle, this.keywords, this.page);
+  final IconData icon;
+  final String title, subtitle, keywords;
+  final Widget Function() page;
+}
+
+/// Settings home: searchable list of categories, each with its own page.
+class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  String q = '';
 
   @override
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final p = context.pal;
     final set = s.settings;
-    final perApp = set.get<String>('perAppMode');
+    final rules = set.get<String>('customRules').split('\n').where((l) => l.trim().isNotEmpty && !l.trim().startsWith('#')).length;
+    final cats = <_Cat>[
+      _Cat(Icons.palette_rounded, 'Appearance', 'Theme, accent colours, glass blur', 'theme dark light accent colour color blur haptic', () => const _AppearancePage()),
+      _Cat(Icons.vpn_lock_rounded, 'Connection', 'Kill switch, reconnect, per-app VPN, timers', 'kill switch reconnect auto connect ipv6 mtu per app split sleep timer smart fastest', () => const _ConnectionPage()),
+      _Cat(Icons.alt_route_rounded, 'Routing & rules', '$rules custom rule${rules == 1 ? '' : 's'} · ${set.get<String>('routing') == 'global' ? 'everything proxied' : 'smart bypass'}', 'routing rules domain geosite geoip bypass lan china iran russia block ads quic bittorrent geo files', () => const _RoutingPage()),
+      _Cat(Icons.dns_rounded, 'DNS', '${set.get<String>('dnsPreset')}${set.get<bool>('dnsDoh') ? ' · DoH' : ''}${set.get<bool>('fakeDns') ? ' · FakeDNS' : ''}', 'dns doh fake hosts resolver cloudflare google quad9 adguard', () => const _DnsPage()),
+      _Cat(Icons.bolt_rounded, 'Xray / V2Ray core', 'Mux, fragment, sockopt, failover, chain, JSON', 'xray v2ray core mux xudp fragment sniffing tcp fast open fingerprint utls failover balancer chain double hop json lan share port', () => const _XrayPage()),
+      _Cat(Icons.terminal_rounded, 'SSH', 'Keep-alive, host keys, jump host, transports', 'ssh keepalive host key jump proxy tls sni payload cipher', () => const _SshPage()),
+      _Cat(Icons.android_rounded, 'Android', 'Wake lock, battery, notification, network', 'android wake lock battery boot notification bypass underlying lan always on data saver diagnostics', () => const _AndroidPage()),
+      _Cat(Icons.shield_rounded, 'Security & privacy', 'App PIN, screenshots, logs', 'security privacy pin lock screenshot secure logs wipe', () => const _SecurityPage()),
+      _Cat(Icons.storage_rounded, 'Data & backup', 'Usage caps, subscriptions, settings backup', 'data usage cap subscription backup restore export import', () => const _DataPage()),
+      _Cat(Icons.info_outline_rounded, 'About', 'Versions, device ID, reset', 'about version device id reset', () => const _AboutPage()),
+    ];
+    final shown = cats.where((c) => q.isEmpty || '${c.title} ${c.subtitle} ${c.keywords}'.toLowerCase().contains(q.toLowerCase())).toList();
 
     return Scaffold(
       body: Backdrop(
@@ -30,104 +69,44 @@ class SettingsPage extends StatelessWidget {
                 const Text('Settings', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, letterSpacing: -.5)),
               ]),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 6, 20, 8),
+              child: TextField(
+                onChanged: (v) => setState(() => q = v),
+                decoration: InputDecoration(
+                  hintText: 'Search settings (dns, mux, wake lock…)',
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  filled: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(18), borderSide: BorderSide.none),
+                ),
+              ),
+            ),
             Expanded(
-              child: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
-                _Section('Appearance', [
-                  _Row(
-                    title: 'Theme',
-                    trailing: SegmentedButton<int>(
-                      showSelectedIcon: false,
-                      style: SegmentedButton.styleFrom(visualDensity: VisualDensity.compact, selectedBackgroundColor: p.accentSoft, selectedForegroundColor: p.accent),
-                      segments: const [ButtonSegment(value: 0, label: Text('Auto')), ButtonSegment(value: 1, label: Text('Light')), ButtonSegment(value: 2, label: Text('Dark'))],
-                      selected: {set.get<int>('themeMode')},
-                      onSelectionChanged: (v) => s.setSetting('themeMode', v.first),
+              child: ListView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 40), children: [
+                for (final c in shown)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Glass(
+                      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => c.page())),
+                      child: Row(children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(color: p.accentSoft, borderRadius: BorderRadius.circular(14)),
+                          child: Icon(c.icon, color: p.accent, size: 22),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(c.title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15.5)),
+                            const SizedBox(height: 2),
+                            Text(c.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.dim, fontSize: 12.5)),
+                          ]),
+                        ),
+                        Icon(Icons.chevron_right_rounded, color: p.dim),
+                      ]),
                     ),
                   ),
-                  _AccentPicker(),
-                  _SliderRow(title: 'Glass blur', value: set.get<double>('blur'), min: 0, max: 40, onChanged: (v) => s.setSetting('blur', v)),
-                  _SwitchRow('Haptic feedback', null, 'haptics'),
-                ]),
-                _Section('Tunnel', [
-                  _ChoiceRow('Routing', 'routing', const {'global': 'Everything', 'bypassLan': 'Skip LAN', 'bypassLanAds': 'Skip LAN + ads'}),
-                  _SwitchRow('Kill switch', 'Keep traffic blocked if the tunnel drops instead of falling back to the open network', 'killSwitch'),
-                  _SwitchRow('Auto-reconnect', 'Retry up to 5 times when the connection drops', 'autoReconnect'),
-                  _SwitchRow('Connect on launch', null, 'autoConnect'),
-                  _SwitchRow('IPv6', 'Route IPv6 through the tunnel', 'ipv6'),
-                  _ValueRow('MTU', 'mtu', number: true),
-                  _ValueRow('Primary DNS', 'dns1'),
-                  _ValueRow('Secondary DNS', 'dns2'),
-                  _ChoiceRow('Per-app VPN', 'perAppMode', const {'off': 'All apps', 'exclude': 'Exclude apps', 'only': 'Only apps'}),
-                  if (perApp != 'off')
-                    _Row(
-                      title: perApp == 'only' ? 'Apps using the VPN' : 'Apps bypassing the VPN',
-                      subtitle: '${set.list('perApps').length} selected',
-                      onTap: () => _appPicker(context),
-                      trailing: const Icon(Icons.chevron_right_rounded),
-                    ),
-                ]),
-                _Section('Stay connected', [
-                  _ChoiceRow('Wake lock strength', 'wakeMode', const {'off': 'Off', 'balanced': 'CPU only', 'strong': 'CPU + Wi-Fi + watchdog'}),
-                  _Row(
-                    title: 'Allow unrestricted battery use',
-                    subtitle: 'Stops Doze and app standby from pausing the tunnel',
-                    onTap: () => s.bridge.requestIgnoreBattery().catchError((_) => toast(context, 'Not available on this device.')),
-                    trailing: const Icon(Icons.battery_charging_full_rounded, size: 20),
-                  ),
-                  _SwitchRow('Start on boot', 'Reconnect after the phone restarts (needs VPN permission granted once)', 'bootStart'),
-                  _SwitchRow('Smart connect', 'Test every server and pick the fastest on connect', 'smartConnect'),
-                  _IntChoiceRow('Sleep timer', 'sleepTimer', const {0: 'Off', 30: '30 min', 60: '1 h', 120: '2 h', 240: '4 h'}),
-                ]),
-                _Section('Routing & DNS', [
-                  _ChoiceRow('DNS provider', 'dnsPreset', const {'cloudflare': 'Cloudflare', 'google': 'Google', 'quad9': 'Quad9', 'adguard': 'AdGuard', 'custom': 'Custom'}),
-                  _SwitchRow('Block QUIC (UDP 443)', 'Forces browsers onto TCP, which proxies handle better', 'blockQuic'),
-                  _Row(
-                    title: 'Custom rules',
-                    subtitle: set.get<String>('customRules').trim().isEmpty ? 'e.g. direct domain:bank.com' : '${set.get<String>('customRules').trim().split('\n').length} line(s)',
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => _rulesDialog(context),
-                  ),
-                  _ValueRow('Daily data warning (MB, 0 = off)', 'dailyCapMb', number: true),
-                  _ValueRow('Subscription refresh (hours)', 'subRefreshHours', number: true),
-                ]),
-                _Section('Security', [
-                  _Row(
-                    title: set.get<String>('pin').isEmpty ? 'Set app PIN' : 'Change or remove PIN',
-                    subtitle: 'Ask for a PIN when XRay opens or returns from the background',
-                    trailing: Icon(set.get<String>('pin').isEmpty ? Icons.lock_open_rounded : Icons.lock_rounded, size: 20),
-                    onTap: () => _pinDialog(context),
-                  ),
-                  _Row(title: 'Import a config', subtitle: 'File, link or text', trailing: const Icon(Icons.chevron_right_rounded), onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ImportPage()))),
-                ]),
-                _Section('Protocol', [
-                  _SwitchRow('Traffic sniffing', 'Detect domains for smarter routing', 'sniffing'),
-                  _SwitchRow('Multiplexing (Mux)', 'Share one connection between streams', 'mux'),
-                  _SwitchRow('TLS fragmentation', 'Split the TLS hello to evade filtering', 'fragment'),
-                  _SwitchRow('Allow insecure TLS', 'Skips certificate checks. Only for servers you control', 'allowInsecure'),
-                  _ChoiceRow('Core log level', 'logLevel', const {'warning': 'Warning', 'info': 'Info', 'debug': 'Debug', 'none': 'Off'}),
-                  _ValueRow('Local SOCKS port', 'socksPort', number: true),
-                ]),
-                _Section('SSH', [
-                  _ValueRow('Keep-alive (seconds)', 'sshKeepAlive', number: true),
-                  _Row(
-                    title: 'Forget trusted host keys',
-                    subtitle: 'You will be asked to trust each server again',
-                    onTap: () {
-                      s.ssh.forgetHostKeys(s.prefs);
-                      toast(context, 'Host keys cleared');
-                    },
-                  ),
-                ]),
-                _Section('System', [
-                  _Row(title: 'System VPN settings', subtitle: 'Turn on Always-on VPN and Block connections without VPN', onTap: () => s.bridge.openSystemVpnSettings().catchError((_) => toast(context, 'Not available on this device.')), trailing: const Icon(Icons.open_in_new_rounded, size: 19)),
-                  _Row(title: 'Battery optimisation', subtitle: 'Allow XRay to run unrestricted in the background', onTap: () => s.bridge.openBatterySettings().catchError((_) => toast(context, 'Not available on this device.')), trailing: const Icon(Icons.open_in_new_rounded, size: 19)),
-                  _Row(title: 'Reset settings', onTap: () => _confirmReset(context)),
-                ]),
-                _Section('About', [
-                  _Row(title: 'XRay VPN', subtitle: 'io.surprise.vpn · 1.1.0'),
-                  _Row(title: 'Device ID', subtitle: s.deviceCode, trailing: const Icon(Icons.copy_rounded, size: 19), onTap: () { Clipboard.setData(ClipboardData(text: s.deviceCode)); toast(context, 'Device ID copied'); }),
-                  const _Row(title: 'Xray-core', subtitle: 'v26.10.21'),
-                  const _Row(title: 'DartSSH2', subtitle: '4.1.0'),
-                ]),
+                if (shown.isEmpty) const EmptyState(icon: Icons.search_off_rounded, title: 'No match', body: 'Try another word.'),
               ]),
             ),
           ]),
@@ -135,79 +114,112 @@ class SettingsPage extends StatelessWidget {
       ),
     );
   }
+}
 
-  Future<void> _rulesDialog(BuildContext context) async {
-    final s = context.read<AppState>();
-    final ctl = TextEditingController(text: s.settings.get<String>('customRules'));
-    final r = await showDialog<String>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('Custom rules'),
-        content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('One rule per line: proxy, direct or block, then domains or IPs.\nExamples:\ndirect domain:bank.com\nblock geosite:category-ads-all\nproxy ip:8.8.8.8', style: TextStyle(fontSize: 12.5, height: 1.4)),
-            const SizedBox(height: 10),
-            TextField(controller: ctl, minLines: 5, maxLines: 8, autocorrect: false, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+/// Scaffold shared by every settings page.
+class _SubPage extends StatelessWidget {
+  const _SubPage(this.title, this.children, {this.actions = const []});
+  final String title;
+  final List<Widget> Function(BuildContext context) children;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) {
+    context.watch<AppState>();
+    return Scaffold(
+      body: Backdrop(
+        child: SafeArea(
+          child: Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 14, 0),
+              child: Row(children: [
+                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)),
+                Expanded(child: Text(title, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800, letterSpacing: -.5))),
+                ...actions,
+              ]),
+            ),
+            Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: children(context))),
           ]),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(c, ctl.text), child: const Text('Save'))],
       ),
-    );
-    if (r != null) s.setSetting('customRules', r);
-  }
-
-  Future<void> _pinDialog(BuildContext context) async {
-    final s = context.read<AppState>();
-    final has = s.settings.get<String>('pin').isNotEmpty;
-    final a = TextEditingController(), b = TextEditingController();
-    final ok = await showDialog<String>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: Text(has ? 'Change or remove PIN' : 'Set app PIN'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: a, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, decoration: const InputDecoration(labelText: 'New PIN (4-8 digits)')),
-          TextField(controller: b, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, decoration: const InputDecoration(labelText: 'Repeat PIN')),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
-          if (has) TextButton(onPressed: () => Navigator.pop(c, ''), child: const Text('Remove PIN')),
-          FilledButton(onPressed: () => Navigator.pop(c, a.text == b.text && RegExp(r'^\d{4,8}$').hasMatch(a.text) ? a.text : null), child: const Text('Save')),
-        ],
-      ),
-    );
-    if (ok == null) return;
-    await s.setPin(ok);
-    if (context.mounted) toast(context, ok.isEmpty ? 'PIN removed' : 'PIN saved');
-  }
-
-  Future<void> _confirmReset(BuildContext context) async {
-    final s = context.read<AppState>();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('Reset settings?'),
-        content: const Text('Your servers stay. Theme, tunnel and protocol options return to their defaults.'),
-        actions: [TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Reset'))],
-      ),
-    );
-    if (ok == true) s.resetSettings();
-  }
-
-  Future<void> _appPicker(BuildContext context) async {
-    final s = context.read<AppState>();
-    final apps = await s.bridge.installedApps();
-    if (!context.mounted) return;
-    if (apps.isEmpty) {
-      toast(context, 'App list is only available on Android.');
-      return;
-    }
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => ChangeNotifierProvider.value(value: s, child: _AppPickerSheet(apps)),
     );
   }
 }
+
+// ───────── dialogs and pickers ─────────
+
+Future<void> _rulesDialog(BuildContext context) async {
+  final s = context.read<AppState>();
+  final ctl = TextEditingController(text: s.settings.get<String>('customRules'));
+  final r = await showDialog<String>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: const Text('Custom rules'),
+      content: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('One rule per line: proxy, direct or block, then domains or IPs.\nExamples:\ndirect domain:bank.com\nblock geosite:category-ads-all\nproxy ip:8.8.8.8', style: TextStyle(fontSize: 12.5, height: 1.4)),
+          const SizedBox(height: 10),
+          TextField(controller: ctl, minLines: 5, maxLines: 8, autocorrect: false, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+        ]),
+      ),
+      actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(c, ctl.text), child: const Text('Save'))],
+    ),
+  );
+  if (r != null) s.setSetting('customRules', r);
+}
+
+Future<void> _pinDialog(BuildContext context) async {
+  final s = context.read<AppState>();
+  final has = s.settings.get<String>('pin').isNotEmpty;
+  final a = TextEditingController(), b = TextEditingController();
+  final ok = await showDialog<String>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text(has ? 'Change or remove PIN' : 'Set app PIN'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: a, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, decoration: const InputDecoration(labelText: 'New PIN (4-8 digits)')),
+        TextField(controller: b, keyboardType: TextInputType.number, obscureText: true, maxLength: 8, decoration: const InputDecoration(labelText: 'Repeat PIN')),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
+        if (has) TextButton(onPressed: () => Navigator.pop(c, ''), child: const Text('Remove PIN')),
+        FilledButton(onPressed: () => Navigator.pop(c, a.text == b.text && RegExp(r'^\d{4,8}$').hasMatch(a.text) ? a.text : null), child: const Text('Save')),
+      ],
+    ),
+  );
+  if (ok == null) return;
+  await s.setPin(ok);
+  if (context.mounted) toast(context, ok.isEmpty ? 'PIN removed' : 'PIN saved');
+}
+
+Future<void> _confirmReset(BuildContext context) async {
+  final s = context.read<AppState>();
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: const Text('Reset settings?'),
+      content: const Text('Your servers stay. Theme, tunnel and protocol options return to their defaults.'),
+      actions: [TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Reset'))],
+    ),
+  );
+  if (ok == true) s.resetSettings();
+}
+
+Future<void> _appPicker(BuildContext context) async {
+  final s = context.read<AppState>();
+  final apps = await s.bridge.installedApps();
+  if (!context.mounted) return;
+  if (apps.isEmpty) {
+    toast(context, 'App list is only available on Android.');
+    return;
+  }
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    builder: (_) => ChangeNotifierProvider.value(value: s, child: _AppPickerSheet(apps)),
+  );
+}
+
 
 class _Section extends StatelessWidget {
   const _Section(this.title, this.children);
@@ -330,7 +342,9 @@ class _ValueRow extends StatelessWidget {
         if (r == null || r.isEmpty) return;
         if (number) {
           final n = int.tryParse(r);
-          if (n != null && n > 0) s.setSetting(k, n);
+          // Zero is a real value for caps, keep-alive and "automatic" ports; ports and sizes must stay positive.
+          const zeroOk = {'dailyCapMb', 'monthlyCapMb', 'tcpKeepAlive', 'sshLocalPort'};
+          if (n != null && (n > 0 || (n == 0 && zeroOk.contains(k)))) s.setSetting(k, n);
         } else {
           s.setSetting(k, r);
         }

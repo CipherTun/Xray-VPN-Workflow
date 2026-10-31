@@ -44,6 +44,32 @@ class VpnBridge {
   /// Shows the system "allow unrestricted battery use" prompt (Android).
   Future<void> requestIgnoreBattery() => _method.invokeMethod('requestIgnoreBattery');
 
+  Future<bool> isRooted() async {
+    try {
+      return await _method.invokeMethod<bool>('isRooted') ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Blocks screenshots and the recent-apps thumbnail (Android FLAG_SECURE).
+  Future<void> setSecure(bool on) async {
+    try {
+      await _method.invokeMethod('setSecure', {'on': on});
+    } on MissingPluginException {}
+  }
+
+  Future<Map<String, dynamic>> diagnostics() async {
+    try {
+      return Map<String, dynamic>.from(await _method.invokeMethod<Map>('diagnostics') ?? {});
+    } on MissingPluginException {
+      return {};
+    }
+  }
+
+  Future<void> openNotificationSettings() => _method.invokeMethod('openNotificationSettings');
+  Future<void> openDataSaverSettings() => _method.invokeMethod('openDataSaverSettings');
+
   Future<void> openSystemVpnSettings() => _method.invokeMethod('openVpnSettings');
   Future<void> openBatterySettings() => _method.invokeMethod('openBatterySettings');
 }

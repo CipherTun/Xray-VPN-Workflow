@@ -63,7 +63,7 @@ class DashboardPage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 22),
-        if (sel != null && (sel.note.isNotEmpty || expiryText(sel) != null))
+        if (sel != null && (sel.note.isNotEmpty || expiryText(sel) != null || sel.dataLimitMb != null || sel.maxSessionMin != null))
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
             child: Glass(
@@ -74,6 +74,8 @@ class DashboardPage extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(child: Text(sel.author.isEmpty ? 'Message' : 'From ${sel.author}', style: TextStyle(color: p.dim, fontWeight: FontWeight.w700, fontSize: 12.5))),
                   if (expiryText(sel) != null) Pill(expiryText(sel)!, color: sel.expired ? p.bad : p.warn, icon: Icons.timer_outlined),
+                  if (dataLeftText(sel) != null) Padding(padding: const EdgeInsets.only(left: 6), child: Pill(dataLeftText(sel)!, color: sel.dataLimitReached ? p.bad : p.steel, icon: Icons.data_usage_rounded)),
+                  if (sel.maxSessionMin != null) Padding(padding: const EdgeInsets.only(left: 6), child: Pill('${sel.maxSessionMin} min', color: p.steel, icon: Icons.schedule_rounded)),
                 ]),
                 if (sel.note.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(sel.note, style: const TextStyle(height: 1.4, fontSize: 14))),
                 if (sel.expired) Padding(padding: const EdgeInsets.only(top: 8), child: Text('This config has expired. Ask the sender for a new one.', style: TextStyle(color: p.bad, fontSize: 13))),

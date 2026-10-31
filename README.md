@@ -58,16 +58,35 @@ iOS is not built by the workflow: the Packet Tunnel extension target has to be a
 
 ## Sharing configs
 
-Configs travel as an encrypted package (AES-256-GCM): a `xrayvpn://import?d=…` link, a QR code or a `.xrcfg` file. When sharing you can set:
+Open a server → **Share…**. Configs travel as an encrypted package (AES-256-GCM): a `xrayvpn://import?d=…` link, a QR code or a `.xrcfg` file.
 
-* a **message** shown to the person importing (support contact, rules, plan name)
-* an **expiry**: a fixed date, or N days after the first import
-* **Lock credentials**: server address and secrets are hidden in the UI and logs, and edit, copy and export are disabled
-* **Allow re-sharing** on/off
-* **Lock to one device**: paste the recipient's device ID (Settings → About)
-* an optional **password**
+**Locking is automatic.** Switch on *Lock config* and the receiver gets a config whose server address and credentials are hidden in the UI and logs, with editing, copying and exporting disabled. No PIN, phone passcode or password is involved, same as other provider apps. (The app PIN in Settings → Security is a separate privacy feature for opening XRay itself.)
 
-These mirror what tunnel apps such as HTTP Injector and HA Tunnel offer providers (locked/encrypted config files, notes, expiry, hardware lock). Honest limits: the app has to hold the working credentials to connect, so a lock stops casual viewing and editing, not someone who controls a rooted device. Expiry is checked against the phone's clock, which a user can change.
+Presets: *Open*, *Locked*, *Trial* (1 day, 500 MB, 1 h sessions, no root) and *Monthly* (30 days, 20 GB). Every option can be changed:
+
+* **Message** and sender name shown to the receiver on import and on the Dashboard
+* **Validity**: fixed date, or N days counted from the receiver's first import
+* **Protection**: block re-sharing, hide from screenshots, block rooted phones, lock to one device ID (Settings → About)
+* **Limits**: maximum session length and total data, enforced by the receiving app
+* **Live preview** of exactly what the receiver will see
+* **Advanced**: an optional password that encrypts the file for one specific person
+
+If someone re-shares a config they received (when allowed), expiry, data, session, root and lock limits can only be kept or tightened, never loosened.
+
+Honest limits: the app has to hand the real credentials to the VPN core to connect, so a lock stops casual viewing, copying and editing, not someone who controls a rooted phone. Expiry and data counters live on the receiver's phone, so they can be defeated by changing the clock or wiping app data.
+
+## Settings map
+
+| Page | Highlights |
+|---|---|
+| Connection | Kill switch, auto-reconnect, smart connect, auto-disconnect timer, IPv6, MTU, per-app VPN |
+| Routing & rules | Rules editor (drag to reorder, rule tester, presets), direct for a country, block QUIC/BitTorrent, domain strategy, in-app geo file updates |
+| DNS | Providers, DoH, custom servers, FakeDNS, static hosts, query strategy, cache |
+| Xray / V2Ray core | Sniffing, Mux/XUDP, TLS fragmentation, uTLS fingerprint, TCP Fast Open/MPTCP, failover and load balancing (balancer + observatory), double-hop chain, share on LAN with optional login, JSON override, copy generated config |
+| SSH | Keep-alive, timeouts, no-delay, host key policy (trust on first use / manual approval / off) with a trusted-hosts manager, jump host, per-server transports: direct, TLS with custom SNI, HTTP payload |
+| Android | Wake lock levels, battery exemption, boot start, real-network tracking, LAN exclusion, bypass control, notification privacy, Always-on VPN, Data Saver, diagnostics, launcher shortcuts and Quick Settings tile |
+| Security & privacy | App PIN with lock delay, block screenshots, clear logs, erase all data |
+| Data & backup | Daily and monthly caps, usage history, subscriptions, encrypted server backup, settings export and import |
 
 ## Permissions (Android)
 `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SYSTEM_EXEMPTED` (Android 14), `POST_NOTIFICATIONS` (requested at connect time), `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, and the service-level `BIND_VPN_SERVICE`. The system VPN consent dialog is shown through `VpnService.prepare()` on first connect. Always-on VPN and "Block connections without VPN" are supported through the system settings (Settings → System VPN settings shortcut).

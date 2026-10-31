@@ -17,13 +17,18 @@ class ShareMeta {
     this.locked = false,
     this.allowReshare = true,
     this.deviceHash,
+    this.maxSessionMin,
+    this.dataLimitMb,
+    this.blockRooted = false,
+    this.secure = false,
   });
 
   String title, note, author;
   DateTime? expiresAt;
   int? validDays;
-  bool locked, allowReshare;
+  bool locked, allowReshare, blockRooted, secure;
   String? deviceHash;
+  int? maxSessionMin, dataLimitMb;
 
   Map<String, dynamic> toJson() => {
         'title': title,
@@ -34,6 +39,10 @@ class ShareMeta {
         'locked': locked,
         'reshare': allowReshare,
         if (deviceHash != null) 'dev': deviceHash,
+        if (maxSessionMin != null) 'sess': maxSessionMin,
+        if (dataLimitMb != null) 'cap': dataLimitMb,
+        if (blockRooted) 'noRoot': true,
+        if (secure) 'secure': true,
         'created': DateTime.now().toUtc().toIso8601String(),
       };
 
@@ -46,6 +55,10 @@ class ShareMeta {
         locked: j['locked'] as bool? ?? false,
         allowReshare: j['reshare'] as bool? ?? true,
         deviceHash: j['dev'] as String?,
+        maxSessionMin: j['sess'] as int?,
+        dataLimitMb: j['cap'] as int?,
+        blockRooted: j['noRoot'] as bool? ?? false,
+        secure: j['secure'] as bool? ?? false,
       );
 }
 
@@ -96,7 +109,7 @@ class ConfigPackage {
       'profiles': profiles.map((c) {
         final j = c.toJson();
         // Never carry the sender's own import state or ids into the package.
-        for (final k in ['id', 'ping', 'fav', 'group', 'imp', 'locked', 'noShare', 'dev', 'exp', 'days', 'note', 'author']) {
+        for (final k in ['id', 'ping', 'fav', 'group', 'imp', 'locked', 'noShare', 'dev', 'exp', 'days', 'note', 'author', 'sess', 'cap', 'used', 'noRoot', 'secure']) {
           j.remove(k);
         }
         return j;
@@ -183,6 +196,11 @@ class ConfigPackage {
       c.locked = meta.locked;
       c.allowShare = meta.allowReshare;
       c.deviceHash = meta.deviceHash;
+      c.maxSessionMin = meta.maxSessionMin;
+      c.dataLimitMb = meta.dataLimitMb;
+      c.usedBytes = 0;
+      c.blockRooted = meta.blockRooted;
+      c.secure = meta.secure;
     }
     return profiles;
   }

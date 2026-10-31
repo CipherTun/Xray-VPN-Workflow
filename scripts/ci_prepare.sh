@@ -28,20 +28,37 @@ else:
 s = open(path).read()
 kts = path.endswith(".kts")
 
-# Flutter plugins require Android API 36 or later.
+# Android plugins require API 36.
 if kts:
-    pattern = r"(?m)^(\\s*)compileSdk\\s*=\\s*[^\\n]+$"
+    pattern = r"(?m)^(\s*)compileSdk\s*=\s*[^\n]+$"
     if re.search(pattern, s):
-        s = re.sub(pattern, r"\\1compileSdk = 36", s, count=1)
+        s = re.sub(pattern, r"\1compileSdk = 36", s, count=1)
     else:
         s, count = re.subn(
-            r"(?m)^(\\s*)android\\s*\\{",
-            r"\\1android {\\n    compileSdk = 36",
+            r"(?m)^(\s*)android\s*\{",
+            r"\1android {\n    compileSdk = 36",
             s,
             count=1,
         )
         if count != 1:
-            sys.exit("Could not locate the Android Gradle block.")
+            sys.exit("Could not insert compileSdk 36")
+
+# Ensure Kotlin DSL can use Java Properties.
+if kts and "import java.util.Properties" not in s:
+    s = "import java.util.Properties\n\n" + s
+
+# Correct Java Properties access in Kotlin DSL.
+s = s.replace("keystoreProps.isNotEmpty()", "keystoreProps.size > 0")
+s = s.replace("keystoreProps.size() > 0", "keystoreProps.size > 0")
+for key in ("keyAlias", "keyPassword", "storeFile", "storePassword"):
+    s = s.replace(
+        f'keystoreProps["{key}"] as String',
+        f'keystoreProps.getProperty("{key}")'
+    )
+    s = s.replace(
+        f'keystoreProps["{key}"]',
+        f'keystoreProps.getProperty("{key}")'
+    )
 if not kts:
     print("::warning::Groovy gradle detected; only the AAR dependency is patched"); 
 # min SDK
@@ -52,24 +69,21 @@ if "fileTree" not in s:
           if kts else "\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])\n}\n")
 # release signing from key.properties (kts only)
 if kts and "keystoreProps" not in s:
-    if "import java.util.Properties" not in s:
-        s = "import java.util.Properties\n\n" + s
-
-    s = s.replace("android {", 'val keystoreProps = Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
+    s = s.replace("android {", 'val keystoreProps = java.util.Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
     s = s.replace("    buildTypes {", '''    signingConfigs {
         create("release") {
-            if (keystoreProps.size > 0) {
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
-                storeFile = file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
+            if (keystoreProps.isNotEmpty()) {
+                keyAlias = keystoreProps["keyAlias"] as String
+                keyPassword = keystoreProps["keyPassword"] as String
+                storeFile = file(keystoreProps["storeFile"] as String)
+                storePassword = keystoreProps["storePassword"] as String
             }
         }
     }
 
     buildTypes {''', 1)
     s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.size > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+                  'signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
 open(path, "w").write(s)
 print("patched", path)
 PY

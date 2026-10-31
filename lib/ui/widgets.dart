@@ -143,6 +143,12 @@ String? expiryText(ServerConfig c) {
   return '${d.inMinutes}m left';
 }
 
+/// Remaining data of a limited config, or null.
+String? dataLeftText(ServerConfig c) {
+  final left = c.dataLeftBytes;
+  return left == null ? null : '${fmtBytes(left)} left';
+}
+
 Color pingColor(XPalette p, int? ms) {
   if (ms == null) return p.dim;
   if (ms < 0) return p.bad;

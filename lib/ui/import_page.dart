@@ -108,6 +108,9 @@ class _ImportPageState extends State<ImportPage> {
 
   Future<void> _add() async {
     try {
+      if (pkg!.meta.blockRooted && await context.read<AppState>().bridge.isRooted()) {
+        throw ImportException('This config cannot be used on a rooted device.');
+      }
       final list = await context.read<AppState>().importPackage(pkg!);
       if (!mounted) return;
       toast(context, 'Added ${list.length} server${list.length == 1 ? '' : 's'}');
@@ -192,6 +195,10 @@ class _ImportPageState extends State<ImportPage> {
                           if (m.validDays != null) Pill('Valid ${m.validDays} day${m.validDays == 1 ? '' : 's'} after import', icon: Icons.timer_outlined, color: p.warn),
                           if (m.deviceHash != null) Pill('Bound to a device', icon: Icons.phone_android_rounded),
                           if (!m.allowReshare) const Pill('No re-sharing', icon: Icons.block_rounded),
+                          if (m.dataLimitMb != null) Pill(m.dataLimitMb! >= 1024 ? '${(m.dataLimitMb! / 1024).toStringAsFixed(m.dataLimitMb! % 1024 == 0 ? 0 : 1)} GB data' : '${m.dataLimitMb} MB data', icon: Icons.data_usage_rounded, color: p.steel),
+                          if (m.maxSessionMin != null) Pill('${m.maxSessionMin} min sessions', icon: Icons.schedule_rounded, color: p.steel),
+                          if (m.blockRooted) const Pill('No rooted phones', icon: Icons.security_rounded),
+                          if (m.secure) const Pill('Screenshots blocked', icon: Icons.screenshot_monitor_rounded),
                         ]),
                         if (m.note.isNotEmpty) ...[
                           const SizedBox(height: 14),

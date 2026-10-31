@@ -64,6 +64,8 @@ class XRayVpnService : VpnService() {
     @Volatile private var killSwitch = false
     private var name = "XRay"
     private var wakeMode = "strong"
+    @Volatile private var useUnderlying = true
+    private var hideOnLock = true
     private var cpuLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var netCb: ConnectivityManager.NetworkCallback? = null
@@ -84,7 +86,9 @@ class XRayVpnService : VpnService() {
         val o = JSONObject(opts)
         p.edit().putString(EXTRA_CONFIG, cfg).putString(EXTRA_OPTS, opts)
             .putBoolean("bootStart", o.optBoolean("bootStart")).apply()
-        name = o.optString("name", "XRay")
+        name = if (o.optBoolean("notifShowServer", true)) o.optString("name", "XRay") else "XRay"
+        useUnderlying = o.optBoolean("useUnderlying", true)
+        hideOnLock = o.optBoolean("notifHideLock", true)
         wakeMode = o.optString("wakeMode", "strong")
         startForegroundCompat(buildNotification("Connecting…"))
         worker.execute { startTunnel(cfg, o) }
@@ -116,6 +120,13 @@ class XRayVpnService : VpnService() {
             }
             if (added == 0) b.addDnsServer("1.1.1.1")
             if (Build.VERSION.SDK_INT >= 29) b.setMetered(false)
+            if (o.optBoolean("allowBypass")) b.allowBypass()
+            if (Build.VERSION.SDK_INT >= 33 && o.optBoolean("excludeLan")) {
+                // Keep LAN, hotspot and casting traffic outside the tunnel.
+                for ((addr, len) in listOf("10.0.0.0" to 8, "172.16.0.0" to 12, "192.168.0.0" to 16, "169.254.0.0" to 16)) {
+                    try { b.excludeRoute(android.net.IpPrefix(java.net.InetAddress.getByName(addr), len)) } catch (_: Exception) {}
+                }
+            }
 
             // Per-app VPN
             val apps = mutableListOf<String>()
@@ -260,8 +271,9 @@ class XRayVpnService : VpnService() {
         try {
             val cm = getSystemService(ConnectivityManager::class.java)
             val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) { VpnEvents.log("info", "Network available") }
-                override fun onLost(network: Network) { VpnEvents.log("warn", "Network lost, waiting for another one") }
+                override fun onAvailable(network: Network) { VpnEvents.log("info", "Network available"); refreshUnderlying() }
+                override fun onLost(network: Network) { VpnEvents.log("warn", "Network lost, waiting for another one"); refreshUnderlying() }
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) { refreshUnderlying() }
             }
             val req = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -269,6 +281,22 @@ class XRayVpnService : VpnService() {
                 .build()
             cm.registerNetworkCallback(req, cb)
             netCb = cb
+        } catch (_: Exception) {}
+    }
+
+    /** Tells Android which real network (Wi-Fi preferred) carries the tunnel, for correct handover and metering. */
+    @Suppress("DEPRECATION")
+    private fun refreshUnderlying() {
+        if (!useUnderlying || !running) return
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val nets = cm.allNetworks.filter { n ->
+                val c = cm.getNetworkCapabilities(n)
+                c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            }
+            val best = nets.firstOrNull { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true } ?: nets.firstOrNull()
+            setUnderlyingNetworks(if (best != null) arrayOf(best) else null)
         } catch (_: Exception) {}
     }
 
@@ -336,6 +364,12 @@ class XRayVpnService : VpnService() {
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(Notification.Action.Builder(null, "Disconnect", stop).build())
+        if (hideOnLock) {
+            // Lock screen shows only that the VPN is on; details need an unlocked phone.
+            val pub = (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else @Suppress("DEPRECATION") Notification.Builder(this))
+                .setSmallIcon(R.drawable.ic_stat_shield).setContentTitle("XRay VPN").setContentText("VPN is on").build()
+            b.setVisibility(Notification.VISIBILITY_PRIVATE).setPublicVersion(pub)
+        }
         if (Build.VERSION.SDK_INT >= 31) b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         return b.build()
     }

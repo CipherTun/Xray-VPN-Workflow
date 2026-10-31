@@ -8,6 +8,7 @@ import android.os.PowerManager
 import android.net.VpnService
 import android.os.Build
 import android.provider.Settings
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -86,6 +87,26 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(null)
                 }
+                "isRooted" -> result.success(isRooted())
+                "setSecure" -> {
+                    val on = call.argument<Boolean>("on") ?: false
+                    runOnUiThread {
+                        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                    result.success(null)
+                }
+                "diagnostics" -> result.success(diagnostics())
+                "openNotificationSettings" -> {
+                    startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+                    result.success(null)
+                }
+                "openDataSaverSettings" -> {
+                    try {
+                        startActivity(Intent(Settings.ACTION_IGNORE_BACKGROUND_DATA_RESTRICTIONS_SETTINGS, Uri.parse("package:$packageName")))
+                    } catch (_: Exception) { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+                    result.success(null)
+                }
                 "installedApps" -> result.success(listApps())
                 "openVpnSettings" -> { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)); result.success(null) }
                 "openBatterySettings" -> {
@@ -105,6 +126,32 @@ class MainActivity : FlutterActivity() {
         } else {
             @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
         }
+    }
+
+    /** Cheap, best-effort root hints. Not a security boundary. */
+    private fun isRooted(): Boolean {
+        if (Build.TAGS?.contains("test-keys") == true) return true
+        val paths = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/system/sbin/su", "/data/local/xbin/su",
+            "/data/local/bin/su", "/system/app/Superuser.apk", "/data/adb/magisk", "/sbin/.magisk")
+        return paths.any { java.io.File(it).exists() }
+    }
+
+    private fun diagnostics(): Map<String, Any?> {
+        val pm = getSystemService(PowerManager::class.java)
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        return mapOf(
+            "release" to Build.VERSION.RELEASE,
+            "sdk" to Build.VERSION.SDK_INT,
+            "device" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: "?"),
+            "vpnGranted" to (VpnService.prepare(this) == null),
+            "notifications" to (if (Build.VERSION.SDK_INT >= 24) nm.areNotificationsEnabled() else true),
+            "batteryExempt" to pm.isIgnoringBatteryOptimizations(packageName),
+            "dataSaver" to (if (Build.VERSION.SDK_INT >= 24) cm.restrictBackgroundStatus else null),
+            "rooted" to isRooted(),
+            "running" to XRayVpnService.running,
+        )
     }
 
     private fun listApps(): List<Map<String, String>> {

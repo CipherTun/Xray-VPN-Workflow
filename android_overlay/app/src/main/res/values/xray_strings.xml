@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_connect">Connect</string>
+    <string name="shortcut_connect_long">Connect XRay VPN</string>
+    <string name="shortcut_disconnect">Disconnect</string>
+    <string name="shortcut_disconnect_long">Disconnect XRay VPN</string>
+</resources>

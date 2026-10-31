@@ -131,6 +131,58 @@ class AppState extends ChangeNotifier {
   void setSetting(String key, dynamic value) {
     settings.set(key, value);
     _save();
+    if (key == 'secureScreen') applySecure();
+    notifyListeners();
+  }
+
+  /// Block screenshots when the user asked for it, or when the selected config demands it.
+  void applySecure() {
+    bridge.setSecure(settings.get<bool>('secureScreen') || (selected?.secure ?? false));
+  }
+
+  /// Settings as JSON text (no servers, no PIN hash) for backup or moving to another phone.
+  String exportSettings() {
+    final m = Map<String, dynamic>.from(settings.toJson())..remove('pin');
+    return const JsonEncoder.withIndent('  ').convert(m);
+  }
+
+  /// Merges exported settings over the current ones. Unknown keys are ignored.
+  int importSettings(String text) {
+    final j = jsonDecode(text) as Map<String, dynamic>;
+    var n = 0;
+    j.forEach((k, v) {
+      if (k == 'pin' || !AppSettings.defaults.containsKey(k)) return;
+      final d = AppSettings.defaults[k];
+      if (d is List) {
+        settings.set(k, (v as List).cast<String>());
+      } else if (d is double) {
+        settings.set(k, (v as num).toDouble());
+      } else if (d.runtimeType == v.runtimeType) {
+        settings.set(k, v);
+      } else {
+        return;
+      }
+      n++;
+    });
+    _save();
+    applySecure();
+    notifyListeners();
+    return n;
+  }
+
+  /// Removes servers, settings, usage, host keys and the PIN. Cannot be undone.
+  Future<void> wipeAll() async {
+    if (status != VpnStatus.disconnected) await disconnect();
+    await prefs.clear();
+    configs = [];
+    selectedId = null;
+    settings = AppSettings();
+    usage.clear();
+    logs.clear();
+    appLocked = false;
+    final rnd = Random.secure();
+    deviceId = List.generate(12, (_) => rnd.nextInt(16).toRadixString(16)).join();
+    prefs.setString('deviceId', deviceId);
     notifyListeners();
   }
 
@@ -160,6 +212,7 @@ class AppState extends ChangeNotifier {
   void select(String id) {
     selectedId = id;
     _save();
+    applySecure();
     notifyListeners();
   }
 
@@ -337,6 +390,18 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (c.dataLimitReached) {
+      lastError = 'The data limit of this config has been used up.';
+      log('error', lastError!);
+      _setStatus(VpnStatus.error);
+      return;
+    }
+    if (c.blockRooted && await bridge.isRooted()) {
+      lastError = 'This config cannot be used on a rooted device.';
+      log('error', lastError!);
+      _setStatus(VpnStatus.error);
+      return;
+    }
     _userStopped = false;
     _retryTimer?.cancel();
     _setStatus(VpnStatus.connecting);
@@ -349,9 +414,17 @@ class AppState extends ChangeNotifier {
       }
       int? sshPort;
       if (c.proto == Proto.ssh) {
-        sshPort = await ssh.start(c, settings, prefs, log, onDropped: _onSshDropped);
+        final jumpId = settings.get<String>('sshJumpId');
+        final jump = jumpId.isEmpty || jumpId == c.id ? null : _byId(jumpId);
+        sshPort = await ssh.start(c, settings, prefs, log, onDropped: _onSshDropped, jump: jump?.proto == Proto.ssh ? jump : null);
       }
-      final cfg = buildXrayConfig(c, settings, sshSocksPort: sshPort);
+      final pool = [
+        for (final id in settings.list('failoverIds'))
+          if (id != c.id && _byId(id) != null && _byId(id)!.proto != Proto.ssh && !_byId(id)!.expired) _byId(id)!
+      ];
+      final chainId = settings.get<String>('chainId');
+      final chain = chainId.isEmpty || chainId == c.id ? null : _byId(chainId);
+      final cfg = buildXrayConfig(c, settings, sshSocksPort: sshPort, pool: pool, chain: chain);
       await bridge.start(jsonEncode(cfg), {
         'name': c.name,
         'killSwitch': settings.get<bool>('killSwitch'),
@@ -363,8 +436,14 @@ class AppState extends ChangeNotifier {
         'logLevel': settings.get<String>('logLevel'),
         'wakeMode': settings.get<String>('wakeMode'),
         'bootStart': settings.get<bool>('bootStart'),
+        'allowBypass': settings.get<bool>('allowBypass'),
+        'excludeLan': settings.get<bool>('excludeLan'),
+        'useUnderlying': settings.get<bool>('useUnderlying'),
+        'notifShowServer': settings.get<bool>('notifShowServer') && !c.locked,
+        'notifHideLock': settings.get<bool>('notifHideLock'),
       });
-      final mins = settings.get<int>('sleepTimer');
+      final limits = [settings.get<int>('sleepTimer'), c.maxSessionMin ?? 0].where((m) => m > 0).toList()..sort();
+      final mins = limits.isEmpty ? 0 : limits.first;
       sleepAt = mins > 0 ? DateTime.now().add(Duration(minutes: mins)) : null;
       _timeout?.cancel();
       _timeout = Timer(const Duration(seconds: 25), () {
@@ -387,6 +466,7 @@ class AppState extends ChangeNotifier {
     }
     await ssh.stop();
     _setStatus(VpnStatus.disconnected);
+    if (settings.get<bool>('clearLogsOnDisconnect')) clearLogs();
   }
 
   void _fail(String msg) {
@@ -433,8 +513,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  ServerConfig? _byId(String id) => configs.where((x) => x.id == id).firstOrNull;
+
   void _tick() {
     final c = selected;
+    if (c != null && c.dataLimitReached && status == VpnStatus.connected) {
+      lastError = 'The data limit of this config has been used up.';
+      log('warn', 'Data limit reached for "${c.safeHost == c.host ? c.name : 'locked config'}". Disconnecting.');
+      disconnect();
+      return;
+    }
     if (c != null && c.expired) {
       lastError = 'This config has expired.';
       log('warn', '"${c.name}" has expired. Disconnecting.');
@@ -460,6 +548,16 @@ class AppState extends ChangeNotifier {
     final e = usage.putIfAbsent(dayKey(DateTime.now()), () => [0, 0]);
     e[0] += rx < 0 ? 0 : rx;
     e[1] += tx < 0 ? 0 : tx;
+    final sel = selected;
+    if (sel != null && sel.dataLimitMb != null) {
+      sel.usedBytes += (rx < 0 ? 0 : rx) + (tx < 0 ? 0 : tx);
+      if (_usageTicks % 15 == 0) _save();
+    }
+    final month = settings.get<int>('monthlyCapMb');
+    if (month > 0 && !capExceeded && monthBytes() > month * 1024 * 1024) {
+      capExceeded = true;
+      log('warn', 'Monthly data limit of $month MB reached');
+    }
     if (usage.length > 90) usage.remove((usage.keys.toList()..sort()).first);
     final cap = settings.get<int>('dailyCapMb');
     if (cap > 0 && (e[0] + e[1]) > cap * 1024 * 1024 && !capExceeded) {
@@ -467,6 +565,11 @@ class AppState extends ChangeNotifier {
       log('warn', 'Daily data limit of $cap MB reached');
     }
     if (++_usageTicks % 15 == 0) _saveUsage();
+  }
+
+  int monthBytes() {
+    final prefix = dayKey(DateTime.now()).substring(0, 7);
+    return usage.entries.where((e) => e.key.startsWith(prefix)).fold(0, (a, e) => a + e.value[0] + e.value[1]);
   }
 
   void clearUsage() {
@@ -511,7 +614,7 @@ class AppState extends ChangeNotifier {
   void onLifecycle(AppLifecycleState st) {
     if (st == AppLifecycleState.paused) _bgAt = DateTime.now();
     if (st == AppLifecycleState.resumed && _bgAt != null) {
-      if (settings.get<String>('pin').isNotEmpty && DateTime.now().difference(_bgAt!).inSeconds > 30) {
+      if (settings.get<String>('pin').isNotEmpty && DateTime.now().difference(_bgAt!).inSeconds >= settings.get<int>('autoLockSec')) {
         appLocked = true;
         notifyListeners();
       }
@@ -584,6 +687,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> onAppStart() async {
+    applySecure();
     refreshSubscriptions();
     if (settings.get<bool>('autoConnect') && selected != null && status == VpnStatus.disconnected) {
       await connect();
