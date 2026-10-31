@@ -59,6 +59,17 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Set up Android SDK 37
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0'
+
+      - name: Verify Android SDK 37
+        run: |
+          sdkmanager --list_installed
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
+          test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
+
 
       # ── Xray core (libXray.aar), cached by version ──
       - name: Cache libXray.aar
@@ -70,11 +81,11 @@ jobs:
 
       - name: Build libXray.aar
         if: steps.aar.outputs.cache-hit != 'true'
-        run: ./scripts/ci_build_libxray.sh
+        run: bash ./scripts/ci_build_libxray.sh
 
       # ── Project scaffolding, icons, geo files ──
       - name: Prepare Flutter project
-        run: ./scripts/ci_prepare.sh
+        run: bash ./scripts/ci_prepare.sh
 
       # ── Signing ──
       # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
