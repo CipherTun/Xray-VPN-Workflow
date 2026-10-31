@@ -28,20 +28,20 @@ else:
 s = open(path).read()
 kts = path.endswith(".kts")
 
-# Android plugins require API 36.
+# Android API 37.0.
 if kts:
     pattern = r"(?m)^(\s*)compileSdk\s*=\s*[^\n]+$"
     if re.search(pattern, s):
-        s = re.sub(pattern, r"\1compileSdk = 36", s, count=1)
+        s = re.sub(pattern, r"\1compileSdk = 37", s, count=1)
     else:
         s, count = re.subn(
             r"(?m)^(\s*)android\s*\{",
-            r"\1android {\n    compileSdk = 36",
+            r"\1android {\n    compileSdk = 37",
             s,
             count=1,
         )
         if count != 1:
-            sys.exit("Could not insert compileSdk 36")
+            sys.exit("Could not insert compileSdk 37")
 
 # Ensure Kotlin DSL can use Java Properties.
 if kts and "import java.util.Properties" not in s:
