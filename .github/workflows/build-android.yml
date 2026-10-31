@@ -59,6 +59,10 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install Android SDK 36
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
       # ── Xray core (libXray.aar), cached by version ──
       - name: Cache libXray.aar
         id: aar
@@ -69,11 +73,11 @@ jobs:
 
       - name: Build libXray.aar
         if: steps.aar.outputs.cache-hit != 'true'
-        run: bash ./scripts/ci_build_libxray.sh
+        run: ./scripts/ci_build_libxray.sh
 
       # ── Project scaffolding, icons, geo files ──
       - name: Prepare Flutter project
-        run: bash ./scripts/ci_prepare.sh
+        run: ./scripts/ci_prepare.sh
 
       # ── Signing ──
       # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
@@ -123,7 +127,6 @@ jobs:
 
       # ── Checks (never blocks the build, read the log if the app misbehaves) ──
       - name: Analyze
-        continue-on-error: true
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       # ── Build ──
