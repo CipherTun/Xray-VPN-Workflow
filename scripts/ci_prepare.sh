@@ -27,6 +27,21 @@ else:
     sys.exit("no gradle file found")
 s = open(path).read()
 kts = path.endswith(".kts")
+
+# Flutter plugins require Android API 36 or later.
+if kts:
+    pattern = r"(?m)^(\\s*)compileSdk\\s*=\\s*[^\\n]+$"
+    if re.search(pattern, s):
+        s = re.sub(pattern, r"\\1compileSdk = 36", s, count=1)
+    else:
+        s, count = re.subn(
+            r"(?m)^(\\s*)android\\s*\\{",
+            r"\\1android {\\n    compileSdk = 36",
+            s,
+            count=1,
+        )
+        if count != 1:
+            sys.exit("Could not locate the Android Gradle block.")
 if not kts:
     print("::warning::Groovy gradle detected; only the AAR dependency is patched"); 
 # min SDK
