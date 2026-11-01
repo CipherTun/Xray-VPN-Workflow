@@ -3,40 +3,73 @@ package io.surprise.vpn
 import org.json.JSONObject
 
 /**
- * Thin wrapper over libXray (gomobile AAR built from XTLS/libXray against
- * Xray-core v26.10.21 by scripts/build_cores.sh).
- *
- * libXray exposes one structured entry point, `LibXray.invoke(requestJSON)`.
- * The request/response envelope below follows the libXray README for the
- * 26.x line. If you build a different libXray tag, check the README and adjust
- * only this file.
+ * Official XTLS/libXray Invoke API integration.
+ * API v3 accepts the complete Xray JSON document in payload.xrayJson.
  */
 object XrayCore {
-    private fun invoke(req: JSONObject): JSONObject {
-        val raw = libXray.LibXray.invoke(req.toString())
+    private const val API_VERSION = 3
+
+    private fun invoke(request: JSONObject): JSONObject {
+        val raw = libXray.LibXray.invoke(request.toString())
         return try {
             JSONObject(raw)
         } catch (e: Exception) {
-            JSONObject().put("success", false).put("error", raw)
+            JSONObject()
+                .put("success", false)
+                .put("error", "Invalid libXray response: $raw")
         }
     }
 
-    /** Starts Xray with its `tun` inbound bound to [tunFd]. Returns an error message, or null on success. */
-    fun start(configPath: String, datDir: String, tunFd: Int): String? {
-        val env = JSONObject()
-            .put("xray.location.asset", datDir)
-            .put("xray.location.config", configPath)
-            .put("xray.tun.fd", tunFd)
-        val req = JSONObject()
-            .put("apiVersion", 1)
+    /**
+     * Starts Xray using the complete JSON configuration.
+     * The runtime TUN descriptor and asset directory are added to the
+     * configuration root env, as required by upstream libXray.
+     *
+     * Returns null on success, otherwise the upstream error message.
+     */
+    fun start(configJson: String, datDir: String, tunFd: Int): String? {
+        val config = try {
+            JSONObject(configJson)
+        } catch (e: Exception) {
+            return "Invalid Xray configuration JSON: ${e.message}"
+        }
+
+        val env = config.optJSONObject("env") ?: JSONObject()
+        env.put("xray.location.asset", datDir)
+        env.put("xray.tun.fd", tunFd)
+        config.put("env", env)
+
+        val request = JSONObject()
+            .put("apiVersion", API_VERSION)
             .put("method", "runXray")
-            .put("env", env)
-            .put("payload", JSONObject().put("datDir", datDir).put("configPath", configPath))
-        val r = invoke(req)
-        return if (r.optBoolean("success")) null else r.optString("error", "Xray failed to start")
+            .put(
+                "payload",
+                JSONObject().put("xrayJson", config.toString())
+            )
+
+        val response = invoke(request)
+        return if (response.optBoolean("success", false)) {
+            null
+        } else {
+            response.optString("error").ifBlank {
+                "libXray runXray failed without an error message"
+            }
+        }
     }
 
-    fun stop() {
-        invoke(JSONObject().put("apiVersion", 1).put("method", "stopXray"))
+    /** Stops the managed Xray instance using the upstream API v3 contract. */
+    fun stop(): String? {
+        val request = JSONObject()
+            .put("apiVersion", API_VERSION)
+            .put("method", "stopXray")
+
+        val response = invoke(request)
+        return if (response.optBoolean("success", false)) {
+            null
+        } else {
+            response.optString("error").ifBlank {
+                "libXray stopXray failed"
+            }
+        }
     }
 }

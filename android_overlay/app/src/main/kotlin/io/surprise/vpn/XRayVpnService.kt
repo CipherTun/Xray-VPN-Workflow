@@ -143,10 +143,9 @@ class XRayVpnService : VpnService() {
             tun = pfd
 
             copyGeoAssets()
-            val cfgFile = File(filesDir, "config.json")
-            cfgFile.writeText(cfgJson)
-            val err = XrayCore.start(cfgFile.absolutePath, filesDir.absolutePath, pfd.fd)
-            cfgFile.delete() // keep keys off disk once the core has read them
+            // libXray API v3 receives the complete JSON text, not a config path.
+            // XrayCore inserts the runtime TUN fd and asset directory into root env.
+            val err = XrayCore.start(cfgJson, filesDir.absolutePath, pfd.fd)
             if (err != null) throw IllegalStateException(err)
 
             running = true
