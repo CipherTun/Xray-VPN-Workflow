@@ -213,7 +213,7 @@ Map<String, dynamic> buildXrayConfig(
       {
         'tag': 'tun-in',
         'protocol': 'tun',
-        'settings': {'name': 'xray0', 'MTU': s.get<int>('mtu')},
+        'settings': {'name': 'xray0', 'mtu': s.get<int>('mtu')},
         'sniffing': sniffing(),
       },
       {

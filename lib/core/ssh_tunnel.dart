@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:math';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,9 +23,70 @@ class _NetSocket implements SSHSocket {
   @override
   Future<void> get done => _s.done;
   @override
+  Future<void> flush() => _s.flush();
+  @override
   Future<void> close() async => _s.close();
   @override
   void destroy() => _s.destroy();
+}
+
+
+/// Adapts a binary WebSocket message stream to the byte-stream SSHSocket API.
+class _WebSocketSshSocket implements SSHSocket {
+  _WebSocketSshSocket(this._ws, this.stream, this.done);
+
+  final WebSocket _ws;
+
+  @override
+  final Stream<Uint8List> stream;
+
+  @override
+  final Future<void> done;
+
+  @override
+  StreamSink<List<int>> get sink => _WebSocketSink(_ws);
+
+  @override
+  Future<void> flush() async {}
+
+  @override
+  Future<void> close() async {
+    await _ws.close();
+  }
+
+  @override
+  void destroy() {
+    _ws.close();
+  }
+}
+
+class _WebSocketSink implements StreamSink<List<int>> {
+  _WebSocketSink(this._ws);
+
+  final WebSocket _ws;
+
+  @override
+  void add(List<int> data) => _ws.add(Uint8List.fromList(data));
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {
+    _ws.addError(error, stackTrace);
+  }
+
+  @override
+  Future<void> addStream(Stream<List<int>> stream) async {
+    await _ws.addStream(stream);
+  }
+
+  @override
+  Future<void> close() async {
+    await _ws.close();
+  }
+
+  @override
+  Future<void> get done async {
+    await _ws.done;
+  }
 }
 
 /// SSH transport built on DartSSH2: opens an SSH session and exposes a local
@@ -33,8 +95,11 @@ class _NetSocket implements SSHSocket {
 ///
 /// Per-profile transports (profile param `transport`):
 ///  * `direct`: plain TCP
-///  * `tls`: SSH inside TLS with an optional custom SNI (`sni`), like stunnel/HAProxy fronts
-///  * `http`: SSH after an HTTP proxy handshake with a custom `payload` (`proxyHost`, `proxyPort`)
+///  * `tls`: SSH inside TLS
+///  * `http`: SSH after an HTTP proxy payload/CONNECT handshake
+///  * `ws`: SSH over WebSocket
+///  * `wss`: SSH over WebSocket protected by TLS
+/// WS/WSS use `path`, `hostHdr`, `wsHeaders`, and optional `sni`.
 /// Optionally the whole session can ride through another SSH server (jump host).
 class SshTunnel {
   SSHClient? _client;
@@ -53,57 +118,102 @@ class SshTunnel {
     ServerConfig? jump,
   }) async {
     await stop();
-    final timeout = Duration(seconds: s.get<int>('sshConnectTimeout'));
-    final port = s.get<int>('sshLocalPort') > 0 ? s.get<int>('sshLocalPort') : s.get<int>('socksPort') + 2;
 
-    SSHSocket socket;
-    if (jump != null) {
-      log('info', 'SSH: connecting through jump host ${jump.safeHost}');
-      final jc = await _login(jump, s, prefs, log, await _open(jump, s, timeout, log));
-      _jump = jc;
-      await jc.authenticated;
-      log('info', 'SSH: jump host authenticated');
-      socket = await jc.forwardLocal(c.host, c.port);
-    } else {
-      log('info', 'SSH: connecting to ${c.locked ? 'locked server' : '${c.host}:${c.port}'} (${c.p('transport', 'direct')})');
-      socket = await _open(c, s, timeout, log);
+    SSHSocket? pendingSocket;
+
+    try {
+      final timeout = Duration(seconds: s.get<int>('sshConnectTimeout'));
+      final port = s.get<int>('sshLocalPort') > 0
+          ? s.get<int>('sshLocalPort')
+          : s.get<int>('socksPort') + 2;
+
+      if (jump != null) {
+        log('info', 'SSH: connecting through jump host ${jump.safeHost}');
+
+        final jumpSocket = await _open(jump, s, timeout, log);
+        pendingSocket = jumpSocket;
+
+        final jc = await _login(jump, s, prefs, log, jumpSocket);
+        pendingSocket = null;
+        _jump = jc;
+
+        await jc.authenticated.timeout(timeout);
+        log('info', 'SSH: jump host authenticated');
+
+        final targetTransport = c.p('transport', 'direct');
+        if (targetTransport == 'ws' || targetTransport == 'wss') {
+          pendingSocket = await _open(
+            c,
+            s,
+            timeout,
+            log,
+            jumpClient: jc,
+          );
+        } else {
+          pendingSocket = await jc.forwardLocal(c.host, c.port);
+        }
+      } else {
+        log(
+          'info',
+          'SSH: connecting to ${c.locked ? 'locked server' : '${c.host}:${c.port}'} '
+          '(${c.p('transport', 'direct')})',
+        );
+        pendingSocket = await _open(c, s, timeout, log);
+      }
+
+      final targetSocket = pendingSocket!;
+      final client = await _login(c, s, prefs, log, targetSocket);
+      pendingSocket = null;
+      _client = client;
+
+      await client.authenticated.timeout(timeout);
+      log(
+        'info',
+        c.locked ? 'SSH: authenticated' : 'SSH: authenticated as ${c.p('user', 'root')}',
+      );
+
+      _forward = await client.forwardDynamic(
+        bindHost: '127.0.0.1',
+        bindPort: port,
+        options: SSHDynamicForwardOptions(
+          handshakeTimeout: const Duration(seconds: 10),
+          connectTimeout: timeout,
+          maxConnections: s.get<int>('sshMaxConnections'),
+        ),
+      );
+
+      log('info', 'SSH: SOCKS5 listening on 127.0.0.1:$port');
+
+      client.done.then((_) {
+        if (identical(_client, client)) {
+          unawaited(_handleClientDrop(client, log, onDropped));
+        }
+      }).catchError((Object e) {
+        if (identical(_client, client)) {
+          unawaited(_handleClientDrop(client, log, onDropped, error: e));
+        }
+      });
+
+      return port;
+    } catch (_) {
+      try {
+        await pendingSocket?.close();
+      } catch (_) {}
+
+      await stop();
+      rethrow;
     }
-
-    final client = await _login(c, s, prefs, log, socket);
-    _client = client;
-    await client.authenticated.timeout(timeout);
-    log('info', c.locked ? 'SSH: authenticated' : 'SSH: authenticated as ${c.p('user', 'root')}');
-
-    _forward = await client.forwardDynamic(
-      bindHost: '127.0.0.1',
-      bindPort: port,
-      options: SSHDynamicForwardOptions(
-        handshakeTimeout: const Duration(seconds: 10),
-        connectTimeout: timeout,
-        maxConnections: s.get<int>('sshMaxConnections'),
-      ),
-    );
-    log('info', 'SSH: SOCKS5 listening on 127.0.0.1:$port');
-
-    client.done.then((_) {
-      if (identical(_client, client)) {
-        _client = null;
-        log('warn', 'SSH: session closed');
-        onDropped?.call();
-      }
-    }).catchError((Object e) {
-      if (identical(_client, client)) {
-        _client = null;
-        log('error', 'SSH: $e');
-        onDropped?.call();
-      }
-    });
-    return port;
   }
 
   // ───────── transports ─────────
 
-  Future<SSHSocket> _open(ServerConfig c, AppSettings s, Duration timeout, SshLog log) async {
+  Future<SSHSocket> _open(
+    ServerConfig c,
+    AppSettings s,
+    Duration timeout,
+    SshLog log, {
+    SSHClient? jumpClient,
+  }) async {
     final noDelay = s.get<bool>('sshNoDelay');
     switch (c.p('transport', 'direct')) {
       case 'tls':
@@ -119,11 +229,259 @@ class SshTunnel {
         return _NetSocket(tls);
       case 'http':
         return _httpConnect(c, s, timeout, log, noDelay);
+      case 'ws':
+        return _webSocket(c, s, timeout, log, noDelay, secure: false, jumpClient: jumpClient);
+      case 'wss':
+        return _webSocket(c, s, timeout, log, noDelay, secure: true, jumpClient: jumpClient);
       default:
         final raw = await Socket.connect(c.host, c.port, timeout: timeout);
         if (noDelay) raw.setOption(SocketOption.tcpNoDelay, true);
         return _NetSocket(raw);
     }
+  }
+
+
+  /// Bridges a local TCP connection to a remote TCP connection
+  /// carried by an authenticated SSH jump-host channel.
+  Future<void> _bridgeJumpSocket(
+    Socket local,
+    SSHClient jumpClient,
+    String remoteHost,
+    int remotePort,
+  ) async {
+    late final SSHForwardChannel channel;
+
+    try {
+      channel = await jumpClient.forwardLocal(remoteHost, remotePort);
+    } catch (_) {
+      local.destroy();
+      return;
+    }
+
+    var ended = false;
+
+    void closeBoth() {
+      if (ended) return;
+      ended = true;
+      local.destroy();
+      unawaited(channel.close());
+    }
+
+    local.listen(
+      (data) {
+        if (!ended) channel.sink.add(data);
+      },
+      onError: (Object error, StackTrace stack) {
+        closeBoth();
+      },
+      onDone: closeBoth,
+      cancelOnError: true,
+    );
+
+    channel.stream.listen(
+      (data) {
+        if (!ended) {
+          try {
+            local.add(data);
+          } catch (_) {
+            closeBoth();
+          }
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        closeBoth();
+      },
+      onDone: closeBoth,
+      cancelOnError: true,
+    );
+  }
+
+  /// Opens SSH over a WebSocket connection. Dart's WebSocket implementation
+  /// performs the RFC 6455 handshake, masking, frame parsing, ping/pong and
+  /// close handling. Binary WebSocket messages carry the SSH byte stream.
+  Future<SSHSocket> _webSocket(
+    ServerConfig c,
+    AppSettings s,
+    Duration timeout,
+    SshLog log,
+    bool noDelay, {
+    required bool secure,
+    SSHClient? jumpClient,
+  }) async {
+    final endpointHost = c.p('proxyHost', c.host).trim();
+    final endpointPort = int.tryParse(c.p('proxyPort')) ??
+        (secure ? (c.port == 80 ? 443 : c.port) : c.port);
+
+    if (endpointHost.isEmpty || endpointPort < 1 || endpointPort > 65535) {
+      throw ArgumentError('Invalid SSH WebSocket endpoint.');
+    }
+
+    final sni = c.p('sni', c.host).trim();
+    final urlHost = secure ? sni : c.host;
+    if (urlHost.isEmpty) {
+      throw ArgumentError('WebSocket hostname cannot be empty.');
+    }
+
+    final configuredPath = c.p('path', '/').trim();
+    final wsPath = configuredPath.isEmpty
+        ? '/'
+        : (configuredPath.startsWith('/')
+            ? configuredPath
+            : '/$configuredPath');
+
+    final uri = Uri(
+      scheme: secure ? 'wss' : 'ws',
+      host: urlHost,
+      port: endpointPort,
+      path: wsPath,
+    );
+
+    final headers = <String, dynamic>{};
+    final hostHeader = c.p('hostHdr', c.host).trim();
+    if (hostHeader.isNotEmpty) {
+      headers['Host'] = hostHeader;
+    }
+
+    for (final line in const LineSplitter().convert(c.p('wsHeaders'))) {
+      if (line.trim().isEmpty) continue;
+
+      final index = line.indexOf(':');
+      if (index <= 0) {
+        throw FormatException('Invalid WebSocket header: $line');
+      }
+
+      final name = line.substring(0, index).trim();
+      final value = line.substring(index + 1).trim();
+      final lower = name.toLowerCase();
+
+      if (name.isEmpty ||
+          lower == 'host' ||
+          lower == 'upgrade' ||
+          lower == 'connection' ||
+          lower == 'sec-websocket-key' ||
+          lower == 'sec-websocket-protocol' ||
+          lower == 'sec-websocket-version' ||
+          lower == 'content-length' ||
+          lower == 'transfer-encoding') {
+        throw FormatException('Reserved WebSocket header: $name');
+      }
+
+      headers[name] = value;
+    }
+
+    ServerSocket? jumpBridge;
+    if (jumpClient != null) {
+      jumpBridge = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+
+      final activeBridge = jumpBridge;
+      activeBridge.listen((localSocket) {
+        unawaited(
+          _bridgeJumpSocket(
+            localSocket,
+            jumpClient,
+            endpointHost,
+            endpointPort,
+          ),
+        );
+      });
+    }
+
+    final httpClient = HttpClient()
+      ..connectionTimeout = timeout
+      ..findProxy = (_) => 'DIRECT'
+      ..badCertificateCallback = (_, __, ___) =>
+          secure &&
+          (c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'));
+
+    // The URL retains the target hostname for Host/SNI/certificate checks.
+    // With a jump host, the actual TCP connection goes to the loopback
+    // listener, which forwards it through an SSHForwardChannel.
+    httpClient.connectionFactory = (requestedUri, proxyHost, proxyPort) {
+      if (proxyHost != null || proxyPort != null) {
+        throw UnsupportedError(
+          'Unexpected HTTP proxy configured for SSH WebSocket.',
+        );
+      }
+
+      final socketFuture = Socket.connect(
+        jumpBridge?.address ?? InternetAddress.loopbackIPv4,
+        jumpBridge?.port ?? endpointPort,
+        timeout: timeout,
+      ).then((socket) {
+        if (noDelay) {
+          socket.setOption(SocketOption.tcpNoDelay, true);
+        }
+        return socket;
+      });
+
+      return Future<ConnectionTask<Socket>>.value(
+        ConnectionTask<Socket>.fromSocket(socketFuture, () {}),
+      );
+    };
+
+    late final WebSocket ws;
+    try {
+      ws = await WebSocket.connect(
+        uri.toString(),
+        customClient: httpClient,
+        headers: headers,
+        compression: CompressionOptions.compressionOff,
+      ).timeout(timeout);
+
+      await jumpBridge?.close();
+      httpClient.close(force: false);
+    } catch (_) {
+      await jumpBridge?.close();
+      httpClient.close(force: true);
+      rethrow;
+    }
+
+    final incoming = StreamController<Uint8List>();
+    final done = Completer<void>();
+    var closed = false;
+
+    void closeInput([Object? error, StackTrace? stack]) {
+      if (closed) return;
+      closed = true;
+
+      if (error != null) {
+        incoming.addError(error, stack);
+      }
+
+      incoming.close();
+      if (!done.isCompleted) done.complete();
+    }
+
+    ws.listen(
+      (event) {
+        if (event is List<int>) {
+          incoming.add(Uint8List.fromList(event));
+        } else if (event is String) {
+          closeInput(
+            const FormatException(
+              'WebSocket server sent a text frame; binary SSH data is required.',
+            ),
+          );
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        closeInput(error, stack);
+      },
+      onDone: closeInput,
+      cancelOnError: true,
+    );
+
+    log(
+      'info',
+      'SSH: ${secure ? 'WSS' : 'WS'} connected; '
+      'endpoint $endpointHost:$endpointPort, path $wsPath'
+      '${secure ? ', SNI $sni' : ''}',
+    );
+
+    return _WebSocketSshSocket(ws, incoming.stream, done.future);
   }
 
   /// Placeholders: [host] [port] [host_port] [crlf] [cr] [lf]
@@ -172,7 +530,7 @@ class SshTunnel {
         if (i < 0) return;
         passthrough = true;
         final first = latin1.decode(bytes.sublist(0, i)).split('\r\n').first;
-        if (first.startsWith('HTTP/') && (first.contains(' 200') || first.contains(' 101'))) {
+        if (first.startsWith('HTTP/') && (first.contains(' 200'))) {
           ready.complete();
           final rest = bytes.sublist(i + 4);
           if (rest.isNotEmpty) ctl.add(Uint8List.fromList(rest));
@@ -232,16 +590,62 @@ class SshTunnel {
 
   // ───────── lifecycle ─────────
 
-  Future<void> stop() async {
-    final c = _client, j = _jump;
+  Future<void> _handleClientDrop(
+    SSHClient client,
+    SshLog log,
+    void Function()? onDropped, {
+    Object? error,
+  }) async {
+    if (!identical(_client, client)) return;
+
+    final forward = _forward;
+    final jump = _jump;
     _client = null;
     _jump = null;
-    try {
-      await _forward?.close();
-    } catch (_) {}
     _forward = null;
-    c?.close();
-    j?.close();
+
+    try {
+      await forward?.close();
+    } catch (e) {
+      log('warn', 'SSH: SOCKS cleanup failed: $e');
+    }
+
+    try {
+      await client.close();
+    } catch (_) {}
+
+    try {
+      await jump?.close();
+    } catch (_) {}
+
+    if (error == null) {
+      log('warn', 'SSH: session closed');
+    } else {
+      log('error', 'SSH: $error');
+    }
+    onDropped?.call();
+  }
+
+  Future<void> stop() async {
+    final client = _client;
+    final jump = _jump;
+    final forward = _forward;
+
+    _client = null;
+    _jump = null;
+    _forward = null;
+
+    try {
+      await forward?.close();
+    } catch (_) {}
+
+    try {
+      await client?.close();
+    } catch (_) {}
+
+    try {
+      await jump?.close();
+    } catch (_) {}
   }
 
   // ───────── host key store helpers (used by Settings) ─────────

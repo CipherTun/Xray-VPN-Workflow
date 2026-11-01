@@ -32,19 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Phone-friendly: upload xray_vpn.zip to the repo root and this step unpacks it.
-      # If the project files are already in the repo, the step does nothing.
-      - name: Unpack project zip
-        run: |
-          if [ -f xray_vpn.zip ]; then
-            rm -rf _src && mkdir _src && unzip -q xray_vpn.zip -d _src
-            P="$(find _src -maxdepth 3 -name pubspec.yaml | head -1)"
-            [ -n "$P" ] && cp -R "$(dirname "$P")"/. . 
-            rm -rf _src
-          fi
-          test -f pubspec.yaml || { echo "::error::pubspec.yaml not found. Upload xray_vpn.zip to the repository root."; exit 1; }
-          ls
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

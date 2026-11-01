@@ -25,40 +25,14 @@ for name in ("android/app/build.gradle.kts", "android/app/build.gradle"):
         path = name; break
 else:
     sys.exit("no gradle file found")
-s = open(path).read()
+s = open(path, encoding="utf-8").read()
+# Repair a Gradle header containing literal escaped line breaks.
+bad_header = r"import java.util.Properties\n\nplugins {"
+good_header = "import java.util.Properties\n\nplugins {"
+if s.startswith(bad_header):
+    s = good_header + s[len(bad_header):]
+    print("repaired escaped Gradle header")
 kts = path.endswith(".kts")
-
-# Android API 37.0.
-if kts:
-    pattern = r"(?m)^(\s*)compileSdk\s*=\s*[^\n]+$"
-    if re.search(pattern, s):
-        s = re.sub(pattern, r"\1compileSdk = 37", s, count=1)
-    else:
-        s, count = re.subn(
-            r"(?m)^(\s*)android\s*\{",
-            r"\1android {\n    compileSdk = 37",
-            s,
-            count=1,
-        )
-        if count != 1:
-            sys.exit("Could not insert compileSdk 37")
-
-# Ensure Kotlin DSL can use Java Properties.
-if kts and "import java.util.Properties" not in s:
-    s = "import java.util.Properties\n\n" + s
-
-# Correct Java Properties access in Kotlin DSL.
-s = s.replace("keystoreProps.isNotEmpty()", "keystoreProps.size > 0")
-s = s.replace("keystoreProps.size() > 0", "keystoreProps.size > 0")
-for key in ("keyAlias", "keyPassword", "storeFile", "storePassword"):
-    s = s.replace(
-        f'keystoreProps["{key}"] as String',
-        f'keystoreProps.getProperty("{key}")'
-    )
-    s = s.replace(
-        f'keystoreProps["{key}"]',
-        f'keystoreProps.getProperty("{key}")'
-    )
 if not kts:
     print("::warning::Groovy gradle detected; only the AAR dependency is patched"); 
 # min SDK
@@ -67,23 +41,53 @@ s = re.sub(r"minSdk(Version)?\s*=?\s*flutter\.minSdkVersion", "minSdk = 24" if k
 if "fileTree" not in s:
     s += ('\ndependencies {\n    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))\n}\n'
           if kts else "\ndependencies {\n    implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])\n}\n")
-# release signing from key.properties (kts only)
+# release signing from key.properties (Kotlin DSL only)
 if kts and "keystoreProps" not in s:
-    s = s.replace("android {", 'val keystoreProps = java.util.Properties().apply {\n    val f = rootProject.file("key.properties")\n    if (f.exists()) load(f.inputStream())\n}\n\nandroid {', 1)
-    s = s.replace("    buildTypes {", '''    signingConfigs {
-        create("release") {
-            if (keystoreProps.isNotEmpty()) {
-                keyAlias = keystoreProps["keyAlias"] as String
-                keyPassword = keystoreProps["keyPassword"] as String
-                storeFile = file(keystoreProps["storeFile"] as String)
-                storePassword = keystoreProps["storePassword"] as String
-            }
-        }
-    }
+    signing_header = [
+        'val keystoreProps: Map<String, String> = rootProject.file("key.properties").let { f ->',
+        '    if (!f.exists()) emptyMap()',
+        '    else f.readLines().mapNotNull { line ->',
+        '        val t = line.trim()',
+        '        if (t.isEmpty() || t.startsWith("#") || !t.contains("=")) null',
+        '        else {',
+        '            val i = t.indexOf("=")',
+        '            t.substring(0, i).trim() to t.substring(i + 1).trim()',
+        '        }',
+        '    }.toMap()',
+        '}',
+        '',
+        'android {',
+    ]
+    s = s.replace("android {", "\n".join(signing_header), 1)
 
-    buildTypes {''', 1)
-    s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+    signing_config = [
+        '    signingConfigs {',
+        '        create("release") {',
+        '            if (keystoreProps.isNotEmpty()) {',
+        '                keyAlias = keystoreProps.getValue("keyAlias")',
+        '                keyPassword = keystoreProps.getValue("keyPassword")',
+        '                storeFile = file(keystoreProps.getValue("storeFile"))',
+        '                storePassword = keystoreProps.getValue("storePassword")',
+        '            }',
+        '        }',
+        '    }',
+        '',
+        '    buildTypes {',
+    ]
+
+    if "    buildTypes {" not in s:
+        sys.exit("ERROR: buildTypes block not found")
+
+    s = s.replace("    buildTypes {", "\n".join(signing_config), 1)
+
+    debug_signing = 'signingConfig = signingConfigs.getByName("debug")'
+    release_signing = 'signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")'
+
+    if debug_signing in s:
+        s = s.replace(debug_signing, release_signing, 1)
+    else:
+        print("WARNING: debug signing assignment was not found")
+
 open(path, "w").write(s)
 print("patched", path)
 PY
