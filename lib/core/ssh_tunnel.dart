@@ -389,12 +389,12 @@ class SshTunnel {
       });
     }
 
-    final httpClient = HttpClient()
-      ..connectionTimeout = timeout
-      ..findProxy = (_) => 'DIRECT'
-      ..badCertificateCallback = (_, __, ___) =>
-          secure &&
-          (c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'));
+    final httpClient = HttpClient();
+    httpClient.connectionTimeout = timeout;
+    httpClient.findProxy = (_) => 'DIRECT';
+    httpClient.badCertificateCallback = (_, __, ___) =>
+        secure &&
+        (c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'));
 
     // The URL retains the target hostname for Host/SNI/certificate checks.
     // With a jump host, the actual TCP connection goes to the loopback
@@ -406,20 +406,22 @@ class SshTunnel {
         );
       }
 
-      final socketFuture = Socket.connect(
+      return Socket.startConnect(
         jumpBridge?.address ?? InternetAddress.loopbackIPv4,
         jumpBridge?.port ?? endpointPort,
-        timeout: timeout,
-      ).then((socket) {
-        if (noDelay) {
-          socket.setOption(SocketOption.tcpNoDelay, true);
-        }
-        return socket;
+      ).timeout(timeout).then((task) {
+        task.socket.then(
+          (socket) {
+            if (noDelay) {
+              socket.setOption(SocketOption.tcpNoDelay, true);
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            // HttpClient consumes the same socket future.
+          },
+        );
+        return task;
       });
-
-      return Future<ConnectionTask<Socket>>.value(
-        ConnectionTask<Socket>.fromSocket(socketFuture, () {}),
-      );
     };
 
     late final WebSocket ws;
