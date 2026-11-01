@@ -130,6 +130,13 @@ jobs:
       - name: Analyze
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
+      - name: Clean generated Android build outputs
+        run: |
+          flutter clean
+          rm -rf build
+          rm -rf android/app/build
+          rm -rf android/build
+
       # ── Build ──
       - name: Build release APKs
         if: inputs.build_type != 'debug'
