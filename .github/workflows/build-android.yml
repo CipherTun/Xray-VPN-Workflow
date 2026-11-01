@@ -71,16 +71,9 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
 
 
-      # ── Xray core (libXray.aar), cached by version ──
-      - name: Cache libXray.aar
-        id: aar
-        uses: actions/cache@v4
-        with:
-          path: android-libs
-          key: libxray-${{ env.LIBXRAY_TAG }}-${{ env.XRAY_CORE_TAG }}-v1
-
+      # ── Always rebuild libXray.aar from the pinned source tags ──
+      # Keep Flutter/Gradle and other dependency caches; do not restore a stale AAR.
       - name: Build libXray.aar
-        if: steps.aar.outputs.cache-hit != 'true'
         run: bash ./scripts/ci_build_libxray.sh
 
       # ── Project scaffolding, icons, geo files ──
