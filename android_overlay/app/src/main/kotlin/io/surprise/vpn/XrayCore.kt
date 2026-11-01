@@ -36,7 +36,7 @@ object XrayCore {
 
         val env = config.optJSONObject("env") ?: JSONObject()
         env.put("xray.location.asset", datDir)
-        env.put("xray.tun.fd", tunFd)
+        env.put("xray.tun.fd", tunFd.toString())
         config.put("env", env)
 
         val request = JSONObject()
