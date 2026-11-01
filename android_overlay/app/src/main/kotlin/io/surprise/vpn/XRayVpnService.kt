@@ -109,8 +109,10 @@ class XRayVpnService : VpnService() {
                 .setMtu(o.optInt("mtu", 1500))
                 .addAddress("172.19.0.1", 30)
                 .addRoute("0.0.0.0", 0)
-            if (o.optBoolean("ipv6")) b.addAddress("fd00:1:fd00:1::1", 126)
-            b.addRoute("::", 0) // IPv6 either flows through Xray or is dropped; never leaks
+            if (o.optBoolean("ipv6")) {
+                b.addAddress("fd00:1:fd00:1::1", 126)
+                b.addRoute("::", 0)
+            }
 
             val dns = o.optJSONArray("dns")
             var added = 0

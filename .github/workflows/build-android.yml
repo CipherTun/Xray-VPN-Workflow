@@ -21,8 +21,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  XRAY_CORE_TAG: v26.10.21   # Xray-core release to build into libXray
-  LIBXRAY_TAG: v26.9.9       # XTLS/libXray tag used as the wrapper
+  # The official libXray builder pins its compatible Xray-core dependency.
+  # Do not independently override Xray-core outside that builder.
+  LIBXRAY_TAG: v26.9.9       # XTLS/libXray wrapper release
 
 jobs:
   android:
@@ -75,6 +76,37 @@ jobs:
       # Keep Flutter/Gradle and other dependency caches; do not restore a stale AAR.
       - name: Build libXray.aar
         run: bash ./scripts/ci_build_libxray.sh
+
+      # ── Inspect the exact generated libXray Android API ──
+      - name: Inspect libXray Android bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAR="android-libs/libXray.aar"
+          test -s "$AAR" || { echo "::error::libXray.aar is missing"; exit 1; }
+
+          mkdir -p "$RUNNER_TEMP/libxray-api"
+          cd "$RUNNER_TEMP/libxray-api"
+          unzip -o "$GITHUB_WORKSPACE/$AAR" classes.jar >/dev/null
+          test -s classes.jar || { echo "::error::classes.jar missing from AAR"; exit 1; }
+
+          echo "========== GENERATED LIBXRAY CLASSES =========="
+          jar tf classes.jar | grep -i 'libxray' | sort
+
+          echo "========== LIBXRAY PUBLIC API =========="
+          while IFS= read -r class; do
+            name="${class%.class}"
+            name="${name//\//.}"
+            case "$name" in
+              *LibXray*|*DialerController*|*ProcessFinder*)
+                echo "----- $name -----"
+                javap -classpath classes.jar -public "$name" || true
+                ;;
+            esac
+          done < <(jar tf classes.jar | grep '\.class$' | sort)
+
+          echo "========== AAR CHECKSUM =========="
+          sha256sum "$GITHUB_WORKSPACE/$AAR"
 
       # ── Project scaffolding, icons, geo files ──
       - name: Prepare Flutter project
