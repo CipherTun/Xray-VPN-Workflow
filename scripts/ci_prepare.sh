@@ -44,15 +44,30 @@ if "fileTree" not in s:
 
 # 3) Release signing from android/key.properties (written by the workflow)
 if "keystoreProps" not in s:
-    s = "import java.util.Properties\\n\\n" + s\ns = re.sub(r"(?m)^android \\{", '''val keystoreProps = Properties().apply {
-    val f = rootProject.file("key.properties")
-    if (f.exists()) f.inputStream().use { input -> this.load(input) }
+    if "import java.util.Properties" not in s:
+        s = "import java.util.Properties\n\n" + s
+
+    declaration = """val keystoreProps = Properties().apply {
+    val propsFile = rootProject.file("key.properties")
+    if (propsFile.exists()) {
+        propsFile.inputStream().use { input -> this.load(input) }
+    }
 }
 
-android {''', s, count=1)
-    s = s.replace("    buildTypes {", '''    signingConfigs {
+android {"""
+
+    s, count = re.subn(
+        r"(?m)^android\s*\{",
+        lambda _: declaration,
+        s,
+        count=1
+    )
+    if count != 1:
+        raise SystemExit("STOP: Android block not found; file unchanged.")
+
+    signing = """    signingConfigs {
         create("release") {
-            if (keystoreProps.size() > 0) {
+            if (keystoreProps.isNotEmpty()) {
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
                 storeFile = file(keystoreProps.getProperty("storeFile"))
@@ -61,9 +76,18 @@ android {''', s, count=1)
         }
     }
 
-    buildTypes {''', 1)
-    s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.size() > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+    buildTypes {"""
+
+    if "    buildTypes {" not in s:
+        raise SystemExit("STOP: buildTypes block not found; file unchanged.")
+
+    s = s.replace("    buildTypes {", signing, 1)
+    s = s.replace(
+        'signingConfig = signingConfigs.getByName("debug")',
+        'signingConfig = if (keystoreProps.isNotEmpty()) '
+        'signingConfigs.getByName("release") '
+        'else signingConfigs.getByName("debug")'
+    )
 
 # 4) R8: keep the gomobile classes (they are looked up by name from native code)
 if "proguard-rules.pro" not in s:
