@@ -44,15 +44,15 @@ if "fileTree" not in s:
 
 # 3) Release signing from android/key.properties (written by the workflow)
 if "keystoreProps" not in s:
-    s = re.sub(r"(?m)^android \{", '''val keystoreProps = java.util.Properties().apply {
+    s = "import java.util.Properties\\n\\n" + s\ns = re.sub(r"(?m)^android \\{", '''val keystoreProps = Properties().apply {
     val f = rootProject.file("key.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
+    if (f.exists()) f.inputStream().use { input -> this.load(input) }
 }
 
 android {''', s, count=1)
     s = s.replace("    buildTypes {", '''    signingConfigs {
         create("release") {
-            if (keystoreProps.isNotEmpty()) {
+            if (keystoreProps.size() > 0) {
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
                 storeFile = file(keystoreProps.getProperty("storeFile"))
@@ -63,7 +63,7 @@ android {''', s, count=1)
 
     buildTypes {''', 1)
     s = s.replace('signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = if (keystoreProps.isNotEmpty()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
+                  'signingConfig = if (keystoreProps.size() > 0) signingConfigs.getByName("release") else signingConfigs.getByName("debug")')
 
 # 4) R8: keep the gomobile classes (they are looked up by name from native code)
 if "proguard-rules.pro" not in s:
