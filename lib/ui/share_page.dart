@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
@@ -461,7 +462,7 @@ class _ResultSheet extends StatelessWidget {
     final safe = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_');
     final f = File('${dir.path}/$safe.xrcfg');
     await f.writeAsString(envelope);
-    await Share.shareXFiles([XFile(f.path, mimeType: 'application/json')], subject: 'XRay VPN config');
+    await SharePlus.instance.share(ShareParams(files: [XFile(f.path, mimeType: 'application/json')], subject: 'XRay VPN config'));
   }
 
   @override
@@ -510,7 +511,7 @@ class _ResultSheet extends StatelessWidget {
       ]),
       const SizedBox(height: 10),
       TextButton.icon(
-        onPressed: () => Share.share(link),
+        onPressed: () => SharePlus.instance.share(ShareParams(text: link)),
         icon: const Icon(Icons.send_rounded, size: 18),
         label: const Text('Send link as text'),
       ),

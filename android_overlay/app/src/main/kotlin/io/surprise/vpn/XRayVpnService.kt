@@ -70,6 +70,11 @@ class XRayVpnService : VpnService() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var netCb: ConnectivityManager.NetworkCallback? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        XrayCore.attach(applicationContext)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             worker.execute { stopTunnel("disconnected") }
@@ -143,11 +148,11 @@ class XRayVpnService : VpnService() {
             tun = pfd
 
             copyGeoAssets()
-            // libXray API v3 receives the complete JSON text, not a config path.
-            // XrayCore inserts the runtime TUN fd and asset directory into root env.
-            val err = XrayCore.start(cfgJson, filesDir.absolutePath, pfd.fd)
+            // The config goes to the core as text, so it never touches the disk.
+            val err = XrayCore.start(cfgJson, pfd.fd, filesDir.absolutePath)
             if (err != null) throw IllegalStateException(err)
 
+            XrayCore.version()?.let { VpnEvents.log("info", "Xray-core $it") }
             running = true
             acquireLocks()
             watchNetworks()

@@ -4,7 +4,8 @@ publish_to: none
 version: 1.2.0+3
 
 environment:
-  sdk: ">=3.4.0 <4.0.0"
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.38.0"
 
 dependencies:
   flutter:
@@ -12,21 +13,22 @@ dependencies:
   dartssh2: ^4.1.0          # latest on pub.dev when this was written
   provider: ^6.1.2
   shared_preferences: ^2.3.2
-  google_fonts: ^6.2.1
+  google_fonts: ">=6.2.1 <9.0.0"
   flutter_colorpicker: ^1.1.0
-  permission_handler: ^11.3.1
+  permission_handler: ">=11.3.1 <13.0.0"
   cryptography: ^2.7.0       # AES-256-GCM + PBKDF2 for shared config packages
   crypto: ^3.0.5             # SHA-256 (device ID, PIN)
-  share_plus: ^10.1.4
+  share_plus: ^13.3.1        # SharePlus.instance.share(ShareParams(...)) API
+  cross_file: ^0.3.4         # XFile for sharing files
   path_provider: ^2.1.5
-  file_picker: ^10.3.8
+  file_picker: ">=12.0.0 <13.0.0"   # static FilePicker.pickFile() API
   qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
-  flutter_launcher_icons: ^0.14.1
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true

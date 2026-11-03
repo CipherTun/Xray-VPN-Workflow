@@ -1,75 +1,83 @@
 package io.surprise.vpn
 
-import org.json.JSONObject
+import android.content.Context
+import android.provider.Settings
+import android.util.Base64
+import go.Seq
+import libv2ray.CoreCallbackHandler
+import libv2ray.CoreController
+import libv2ray.Libv2ray
+import java.security.MessageDigest
 
 /**
- * Official XTLS/libXray Invoke API integration.
- * API v3 accepts the complete Xray JSON document in payload.xrayJson.
+ * Thin wrapper over AndroidLibXrayLite (github.com/2dust/AndroidLibXrayLite), the gomobile library
+ * that powers v2rayNG. It embeds the full Xray-core, so every protocol and transport Xray knows is
+ * available: VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP, WireGuard, Hysteria, Reality, XTLS Vision,
+ * WebSocket, gRPC, XHTTP, HTTPUpgrade, mKCP and more.
+ *
+ * The config is passed as text and the TUN file descriptor goes straight into `startLoop`, which feeds
+ * Xray's native `tun` inbound, so no config file and no env tricks are needed.
  */
 object XrayCore {
-    private const val API_VERSION = 3
+    private var appContext: Context? = null
+    private var envReady = false
+    private var controller: CoreController? = null
 
-    private fun invoke(request: JSONObject): JSONObject {
-        val raw = libXray.LibXray.invoke(request.toString())
-        return try {
-            JSONObject(raw)
-        } catch (e: Exception) {
-            JSONObject()
-                .put("success", false)
-                .put("error", "Invalid libXray response: $raw")
+    private val callback = object : CoreCallbackHandler {
+        override fun startup(): Long = 0
+        override fun shutdown(): Long = 0
+        override fun onEmitStatus(code: Long, msg: String?): Long {
+            if (!msg.isNullOrBlank()) VpnEvents.log("info", msg)
+            return 0
         }
+    }
+
+    /** Must be called once with a Context before [start] (gomobile needs it for assets and file access). */
+    fun attach(ctx: Context) {
+        if (appContext != null) return
+        appContext = ctx.applicationContext
+        Seq.setContext(appContext)
+    }
+
+    /** Stable per-install key for XUDP (UDP over a single stream), derived from the device and package. */
+    private fun xudpKey(ctx: Context): String {
+        val id = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: "xray"
+        val digest = MessageDigest.getInstance("SHA-256").digest("$id|${ctx.packageName}".toByteArray())
+        return Base64.encodeToString(digest, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
     }
 
     /**
-     * Starts Xray using the complete JSON configuration.
-     * The runtime TUN descriptor and asset directory are added to the
-     * configuration root env, as required by upstream libXray.
-     *
-     * Returns null on success, otherwise the upstream error message.
+     * Starts Xray with its `tun` inbound bound to [tunFd]. [assetDir] is where geoip.dat / geosite.dat live.
+     * Returns an error message, or null on success.
      */
-    fun start(configJson: String, datDir: String, tunFd: Int): String? {
-        val config = try {
-            JSONObject(configJson)
-        } catch (e: Exception) {
-            return "Invalid Xray configuration JSON: ${e.message}"
-        }
-
-        val env = config.optJSONObject("env") ?: JSONObject()
-        env.put("xray.location.asset", datDir)
-        env.put("xray.tun.fd", tunFd.toString())
-        config.put("env", env)
-
-        val request = JSONObject()
-            .put("apiVersion", API_VERSION)
-            .put("method", "runXray")
-            .put(
-                "payload",
-                JSONObject().put("xrayJson", config.toString())
-            )
-
-        val response = invoke(request)
-        return if (response.optBoolean("success", false)) {
-            null
-        } else {
-            response.optString("error").ifBlank {
-                "libXray runXray failed without an error message"
+    @Synchronized
+    fun start(configJson: String, tunFd: Int, assetDir: String): String? {
+        val ctx = appContext ?: return "The core was not attached to the app yet."
+        return try {
+            if (!envReady) {
+                Libv2ray.initCoreEnv(assetDir, xudpKey(ctx))
+                envReady = true
             }
+            val c = controller ?: Libv2ray.newCoreController(callback).also { controller = it }
+            c.startLoop(configJson, tunFd)
+            null
+        } catch (t: Throwable) {
+            t.message?.takeIf { it.isNotBlank() } ?: "Xray failed to start"
         }
     }
 
-    /** Stops the managed Xray instance using the upstream API v3 contract. */
-    fun stop(): String? {
-        val request = JSONObject()
-            .put("apiVersion", API_VERSION)
-            .put("method", "stopXray")
-
-        val response = invoke(request)
-        return if (response.optBoolean("success", false)) {
-            null
-        } else {
-            response.optString("error").ifBlank {
-                "libXray stopXray failed"
-            }
+    @Synchronized
+    fun stop() {
+        try {
+            controller?.stopLoop()
+        } catch (_: Throwable) {
         }
+    }
+
+    /** Library and Xray-core version string, for the log. */
+    fun version(): String? = try {
+        Libv2ray.checkVersionX()
+    } catch (_: Throwable) {
+        null
     }
 }

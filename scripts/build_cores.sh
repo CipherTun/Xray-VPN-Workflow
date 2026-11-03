@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds libXray (gomobile) against a pinned Xray-core release and installs the artifacts
-# into the Flutter project. Needs: git, go (see libXray go.mod), python3, Android NDK
+# Android: fetches libv2ray.aar (AndroidLibXrayLite). iOS: builds XTLS/libXray (the only Xray wrapper
+# with an iOS target) against a pinned Xray-core. Installs the artifacts into the Flutter project. Needs: git, go (see libXray go.mod), python3, Android NDK
 # (for Android), Xcode (for iOS), gomobile.
 #
 #   ./scripts/build_cores.sh android
@@ -25,11 +25,9 @@ build_libxray() {
 
 case "${1:-}" in
   android)
-    build_libxray
-    # See libXray README for the exact build entry point of your tag.
-    python3 build/main.py android
+    "$ROOT/scripts/ci_fetch_core.sh"
     mkdir -p "$ROOT/android/app/libs"
-    cp -v libXray.aar "$ROOT/android/app/libs/libXray.aar"
+    cp -v "$ROOT/android-libs/libv2ray.aar" "$ROOT/android/app/libs/libv2ray.aar"
     ;;
   ios)
     build_libxray
@@ -40,7 +38,7 @@ case "${1:-}" in
   geo)
     mkdir -p "$ROOT/android/app/src/main/assets"
     for f in geoip.dat geosite.dat; do
-      curl -L -o "$ROOT/android/app/src/main/assets/$f" \
+      curl -fL -o "$ROOT/android/app/src/main/assets/$f" \
         "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f"
     done
     echo "Also add both files to the PacketTunnel target's resources for iOS."

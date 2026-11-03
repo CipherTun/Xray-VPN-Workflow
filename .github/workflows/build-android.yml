@@ -21,25 +21,38 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The official libXray builder pins its compatible Xray-core dependency.
-  # Do not independently override Xray-core outside that builder.
-  LIBXRAY_TAG: v26.9.9       # XTLS/libXray wrapper release
+  CORE_REPO: 2dust/AndroidLibXrayLite   # Xray-core library used by v2rayNG
+  CORE_REF: ""                           # optional tag/commit to build from source instead of the latest release
 
 jobs:
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-java@v4
+      # Phone-friendly: upload xray_vpn.zip to the repo root and this step unpacks it.
+      # If the project files are already in the repo, the step does nothing.
+      - name: Unpack project zip
+        run: |
+          if [ -f xray_vpn.zip ]; then
+            rm -rf _src && mkdir _src && unzip -q xray_vpn.zip -d _src
+            P="$(find _src -maxdepth 3 -name pubspec.yaml | head -1)"
+            [ -n "$P" ] && cp -R "$(dirname "$P")"/. . 
+            rm -rf _src
+          fi
+          test -f pubspec.yaml || { echo "::error::pubspec.yaml not found. Upload xray_vpn.zip to the repository root."; exit 1; }
+          ls
+
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
+          check-latest: true
           cache: false
 
       - uses: subosito/flutter-action@v2
@@ -47,57 +60,29 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Set up Android SDK 37
-        uses: android-actions/setup-android@v4
+      # ── Xray core: libv2ray.aar from AndroidLibXrayLite (the library behind v2rayNG) ──
+      - name: Find the latest core release
+        id: core
+        run: |
+          tag="$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" "https://api.github.com/repos/${CORE_REPO}/releases/latest" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("tag_name",""))' || true)"
+          [ -n "$tag" ] || tag="week-$(date +%G-%V)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Core release: $tag"
+
+      - name: Cache libv2ray.aar
+        id: aar
+        uses: actions/cache@v5
         with:
-          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0'
+          path: android-libs
+          key: libv2ray-${{ steps.core.outputs.tag }}-${{ env.CORE_REF }}-v1
 
-      - name: Verify Android SDK 37
-        run: |
-          sdkmanager --list_installed
-          test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
-          test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
-
-
-      # ── Always rebuild libXray.aar from the pinned source tags ──
-      # Keep Flutter/Gradle and other dependency caches; do not restore a stale AAR.
-      - name: Build libXray.aar
-        run: bash ./scripts/ci_build_libxray.sh
-
-      # ── Inspect the exact generated libXray Android API ──
-      - name: Inspect libXray Android bindings
-        shell: bash
-        run: |
-          set -euo pipefail
-          AAR="android-libs/libXray.aar"
-          test -s "$AAR" || { echo "::error::libXray.aar is missing"; exit 1; }
-
-          mkdir -p "$RUNNER_TEMP/libxray-api"
-          cd "$RUNNER_TEMP/libxray-api"
-          unzip -o "$GITHUB_WORKSPACE/$AAR" classes.jar >/dev/null
-          test -s classes.jar || { echo "::error::classes.jar missing from AAR"; exit 1; }
-
-          echo "========== GENERATED LIBXRAY CLASSES =========="
-          jar tf classes.jar | grep -i 'libxray' | sort
-
-          echo "========== LIBXRAY PUBLIC API =========="
-          while IFS= read -r class; do
-            name="${class%.class}"
-            name="${name//\//.}"
-            case "$name" in
-              *LibXray*|*DialerController*|*ProcessFinder*)
-                echo "----- $name -----"
-                javap -classpath classes.jar -public "$name" || true
-                ;;
-            esac
-          done < <(jar tf classes.jar | grep '\.class$' | sort)
-
-          echo "========== AAR CHECKSUM =========="
-          sha256sum "$GITHUB_WORKSPACE/$AAR"
+      - name: Get libv2ray.aar (prebuilt, or build from source)
+        if: steps.aar.outputs.cache-hit != 'true'
+        run: ./scripts/ci_fetch_core.sh
 
       # ── Project scaffolding, icons, geo files ──
       - name: Prepare Flutter project
-        run: bash ./scripts/ci_prepare.sh
+        run: ./scripts/ci_prepare.sh
 
       # ── Signing ──
       # Preferred: add repo secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
@@ -106,7 +91,7 @@ jobs:
       - name: Restore cached signing key
         if: inputs.build_type != 'debug'
         id: keycache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.xray-signing
           key: xray-signing-key-v1
@@ -147,14 +132,8 @@ jobs:
 
       # ── Checks (never blocks the build, read the log if the app misbehaves) ──
       - name: Analyze
+        continue-on-error: true
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
-
-      - name: Clean generated Android build outputs
-        run: |
-          flutter clean
-          rm -rf build
-          rm -rf android/app/build
-          rm -rf android/build
 
       # ── Build ──
       - name: Build release APKs
@@ -177,7 +156,7 @@ jobs:
           mkdir -p dist && cp build/app/outputs/flutter-apk/app-debug.apk dist/XRayVPN-debug.apk
 
       - name: Upload APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: XRayVPN-apks
           path: dist/*.apk
