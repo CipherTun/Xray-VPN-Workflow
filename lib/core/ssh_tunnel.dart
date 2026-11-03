@@ -26,6 +26,8 @@ class _NetSocket implements SSHSocket {
   @override
   Future<void> get done => _s.done;
   @override
+  Future<void> flush() => _s.flush();
+  @override
   Future<void> close() async => _out != null ? _out.close() : _s.close();
   @override
   void destroy() => _s.destroy();
