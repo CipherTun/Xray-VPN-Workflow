@@ -9,15 +9,21 @@ import android.net.VpnService
 import android.os.Build
 import android.provider.Settings
 import android.view.WindowManager
-import io.flutter.embedding.android.FlutterActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 
-class MainActivity : FlutterActivity() {
-    private val reqVpn = 0x56
+class MainActivity : FlutterFragmentActivity() {
     private var pending: MethodChannel.Result? = null
+
+    // VPN consent dialog via the Activity Result API (replaces startActivityForResult).
+    private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        pending?.success(r.resultCode == RESULT_OK)
+        pending = null
+    }
     private var initial: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,8 +39,10 @@ class MainActivity : FlutterActivity() {
     /** xrayvpn:// links, shared .xrcfg files and shared text become an import request for Dart. */
     private fun handleIncoming(i: Intent?, live: Boolean) {
         if (i == null) return
-        @Suppress("DEPRECATION")
-        val uri: Uri? = i.data ?: i.getParcelableExtra(Intent.EXTRA_STREAM)
+        val stream: Uri? =
+            if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            else @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_STREAM)
+        val uri: Uri? = i.data ?: stream
         val text: String? = when {
             uri != null && uri.scheme == "xrayvpn" -> uri.toString()
             uri != null -> try {
@@ -63,7 +71,7 @@ class MainActivity : FlutterActivity() {
                     if (i == null) result.success(true)
                     else {
                         pending = result
-                        @Suppress("DEPRECATION") startActivityForResult(i, reqVpn)
+                        vpnConsent.launch(i)
                     }
                 }
                 "start" -> {
@@ -115,16 +123,6 @@ class MainActivity : FlutterActivity() {
                 }
                 else -> result.notImplemented()
             }
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == reqVpn) {
-            pending?.success(resultCode == RESULT_OK)
-            pending = null
-        } else {
-            @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
         }
     }
 

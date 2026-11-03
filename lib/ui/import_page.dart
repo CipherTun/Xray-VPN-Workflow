@@ -53,8 +53,8 @@ class _ImportPageState extends State<ImportPage> {
   }
 
   Future<void> _pickFile() async {
-    final r = await FilePicker.platform.pickFiles();
-    final path = r?.files.single.path;
+    final picked = await FilePicker.pickFile();
+    final path = picked?.path;
     if (path == null) return;
     try {
       setState(() => text.text = File(path).readAsStringSync());

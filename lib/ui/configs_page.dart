@@ -314,7 +314,7 @@ class _EditorState extends State<_Editor> {
   late String transport = widget.existing?.p('transport', 'direct') ?? 'direct';
   late String sec = widget.existing?.p('security', 'none') ?? 'none';
 
-  static const keys = ['name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'method', 'aid', 'sni', 'fp', 'path', 'hostHdr', 'flow', 'pbk', 'sid', 'serviceName', 'proxyHost', 'proxyPort', 'payload', 'wsHeaders'];
+  static const keys = ['name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'method', 'aid', 'sni', 'fp', 'path', 'hostHdr', 'flow', 'pbk', 'sid', 'serviceName', 'proxyHost', 'proxyPort', 'payload'];
 
   @override
   void initState() {
@@ -386,16 +386,11 @@ class _EditorState extends State<_Editor> {
       put('privateKey');
       put('passphrase');
       params['transport'] = transport;
-      if (transport == 'tls' || transport == 'wss') put('sni');
-      if (transport == 'http' || transport == 'ws' || transport == 'wss') {
+      if (transport != 'direct') put('sni');
+      if (transport == 'http') {
         put('proxyHost');
         put('proxyPort');
-      }
-      if (transport == 'http') put('payload');
-      if (transport == 'ws' || transport == 'wss') {
-        put('path');
-        put('host', 'hostHdr');
-        put('wsHeaders');
+        put('payload');
       }
       // keep multi-line keys intact
       if (t['privateKey']!.text.trim().isNotEmpty) params['privateKey'] = t['privateKey']!.text;
@@ -439,22 +434,15 @@ class _EditorState extends State<_Editor> {
           _f('id', 'Password', obscure: true),
           _f('privateKey', 'Private key (PEM, optional)', lines: 4),
           _f('passphrase', 'Key passphrase', obscure: true),
-          _chips('Transport', const ['direct', 'tls', 'http', 'ws', 'wss'], transport, (v) => transport = v),
-          if (transport == 'tls' || transport == 'wss') _f('sni', 'SNI (blank = server host)'),
-          if (transport == 'ws' || transport == 'wss') ...[
-            _f('path', 'WebSocket path (default /)'),
-            _f('hostHdr', 'WebSocket Host header (optional)'),
-            _f('wsHeaders', 'Additional WebSocket headers (Name: Value, one per line)', lines: 3),
-            _f('proxyHost', 'WebSocket endpoint host (blank = server host)'),
-            _f('proxyPort', 'WebSocket endpoint port', type: TextInputType.number),
-          ],
+          _chips('Transport', const ['direct', 'tls', 'http'], transport, (v) => transport = v),
+          if (transport == 'tls') _f('sni', 'SNI (blank = server host)'),
           if (transport == 'http') ...[
             _f('proxyHost', 'HTTP proxy host (blank = server host)'),
             _f('proxyPort', 'HTTP proxy port', type: TextInputType.number),
             _f('payload', 'Payload', lines: 3),
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
-              child: Text('Placeholders: [host] [port] [host_port] [crlf] [cr] [lf]. Empty = CONNECT [host_port] HTTP/1.1[crlf]Host: [host][crlf][crlf]. A successful HTTP 200 response opens the SSH session. Use WS/WSS for WebSocket endpoints.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
+              child: Text('Works like HTTP Injector / HTTP Custom. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a;b] [ua] [sni=name] [tls] [plain]. Empty payload = CONNECT [host_port] HTTP/1.1[crlf]Host: [host][crlf][crlf]. For WebSocket add Upgrade: websocket headers: real WebSocket replies are framed automatically, a bare 101 is used as a raw tunnel. Proxy ports 443, 8443, 2053, 2083, 2087 and 2096 use TLS automatically.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
             ),
           ],
           Text('The first connection trusts the server host key and remembers it. A changed key is refused.', style: TextStyle(color: p.dim, fontSize: 12.5)),

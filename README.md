@@ -4,10 +4,10 @@ Flutter VPN client for **Android and iOS**, package / bundle id **`io.surprise.v
 
 | Piece | Version | Notes |
 |---|---|---|
-| Xray-core | **v26.10.21** (latest release, 21 Oct 2026) | Emergency security update that drops compromised root certificates. v26.10.10 and v26.10.17 were withdrawn upstream. |
-| libXray | v26.9.9 tag, rebuilt against the commit above | Official XTLS gomobile wrapper (AAR / xcframework) |
+| Core library (Android) | **AndroidLibXrayLite** (`libv2ray.aar`, latest release) | The Xray-core library behind v2rayNG. Full Xray-core, so every Xray protocol and transport works: VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP, WireGuard, Hysteria, Reality, XTLS Vision, WebSocket, gRPC, XHTTP, HTTPUpgrade, mKCP. Downloaded prebuilt in CI, built from source if no release asset exists. |
+| Core library (iOS) | XTLS/libXray (`LibXray.xcframework`) | AndroidLibXrayLite is Android-only, so iOS keeps the official wrapper. Same Xray-core, same config JSON. |
 | DartSSH2 | **4.1.0** (`dartssh2: ^4.1.0`) | Dynamic forwarding (`ssh -D`) powers the SSH profile type |
-| Flutter | 3.27 or newer | |
+| Flutter | 3.38 or newer (Dart 3.10+) | share_plus 13 and file_picker 12 need it |
 
 ## How it works
 
@@ -29,7 +29,7 @@ Flutter VPN client for **Android and iOS**, package / bundle id **`io.surprise.v
 
 ```bash
 ./scripts/setup.sh                 # flutter create + overlay + gradle patch
-./scripts/build_cores.sh android   # libXray.aar → android/app/libs
+./scripts/build_cores.sh android   # libv2ray.aar → android/app/libs
 ./scripts/build_cores.sh geo       # geoip.dat / geosite.dat (needed for the ad-block rule)
 flutter run
 ```
@@ -46,7 +46,7 @@ flutter run
 1. On github.com create a **private** repository (private keeps your signing key and shared configs safe).
 2. **Add file → Create new file**, name it `.github/workflows/build-android.yml` and paste the contents of `build-android.yml` (shipped next to this zip). Commit.
 3. **Add file → Upload files**, upload `xray_vpn.zip` to the repository root, commit to `main`. The workflow unpacks the zip itself, so you never need to extract anything.
-4. Open the **Actions** tab → *Build Android APK*. The first run takes ~15-25 minutes (it compiles Xray-core into `libXray.aar`; later runs reuse the cache). You can also tap *Run workflow* and pick `debug` for a faster test build.
+4. Open the **Actions** tab → *Build Android APK*. The first run takes ~15-25 minutes (it downloads the Xray core library, or compiles it if no prebuilt file exists; later runs reuse the cache). You can also tap *Run workflow* and pick `debug` for a faster test build.
 5. When it is green, open the run and download the **XRayVPN-apks** artifact. Unzip it with your phone's file manager and install `XRayVPN-arm64-v8a.apk` (most phones) or the universal APK.
 6. To update: upload a new `xray_vpn.zip` (same name, replace) and the build runs again. Push a tag like `v1.0.1` to get the APKs attached to a GitHub Release.
 
@@ -83,7 +83,7 @@ Honest limits: the app has to hand the real credentials to the VPN core to conne
 | Routing & rules | Rules editor (drag to reorder, rule tester, presets), direct for a country, block QUIC/BitTorrent, domain strategy, in-app geo file updates |
 | DNS | Providers, DoH, custom servers, FakeDNS, static hosts, query strategy, cache |
 | Xray / V2Ray core | Sniffing, Mux/XUDP, TLS fragmentation, uTLS fingerprint, TCP Fast Open/MPTCP, failover and load balancing (balancer + observatory), double-hop chain, share on LAN with optional login, JSON override, copy generated config |
-| SSH | Keep-alive, timeouts, no-delay, host key policy (trust on first use / manual approval / off) with a trusted-hosts manager, jump host, per-server transports: direct, TLS with custom SNI, HTTP payload |
+| SSH | Keep-alive, timeouts, no-delay, host key policy (trust on first use / manual approval / off) with a trusted-hosts manager, jump host, per-server transports: direct, TLS with custom SNI, HTTP proxy payload with WebSocket support and HTTP Injector style placeholders |
 | Android | Wake lock levels, battery exemption, boot start, real-network tracking, LAN exclusion, bypass control, notification privacy, Always-on VPN, Data Saver, diagnostics, launcher shortcuts and Quick Settings tile |
 | Security & privacy | App PIN with lock delay, block screenshots, clear logs, erase all data |
 | Data & backup | Daily and monthly caps, usage history, subscriptions, encrypted server backup, settings export and import |
@@ -99,8 +99,21 @@ Strong wake lock (CPU + Wi-Fi lock with watchdog renewal, three levels), battery
 
 ## Known limits (read before shipping)
 * **Not compiled in the environment that produced this code.** I had no Flutter/Android/Xcode toolchain or network, so expect a first-build fix-up pass.
-* libXray changed its public API several times in 2026. `XrayCore.kt` and `PacketTunnelProvider.swift` follow the README of the 26.x `Invoke` API; if your tag differs, only those two files need changes. Same for the Xray `tun` inbound settings in `xray_config.dart`.
+* `XrayCore.kt` follows the AndroidLibXrayLite API (`Libv2ray.initCoreEnv`, `newCoreController`, `startLoop(config, tunFd)`). If a future release renames these, only that file changes. On iOS, `PacketTunnelProvider.swift` follows the libXray `Invoke` API.
 * The SSH profile runs in the Flutter engine. It survives backgrounding while the VPN foreground service keeps the process alive, but swiping the app away ends the engine and the SSH session; auto-reconnect then cannot restart it. For always-on SSH, move DartSSH2 into a headless Dart isolate or the service.
 * Android traffic counters use device-level `TrafficStats` (the app itself is excluded from the VPN), so numbers are approximate. iOS shows status only.
 * Per-app VPN is Android only. iOS extensions are limited to about 50 MB of RAM.
 * The Play Store restricts VPN apps (declaration form, no data harvesting) and `systemExempted` foreground services; App Store requires an organisation account for Network Extension VPNs.
+
+## Legacy plaintext VLESS/Trojan compatibility
+
+The Android core is built from source rather than using the upstream prebuilt AAR.
+The build pins the Xray-core source commit used by the selected AndroidLibXrayLite
+module and applies `scripts/patch_xray_core.py`. This client-side patch permits
+legacy public-endpoint VLESS and Trojan outbounds with `security: none`; it does
+not add encryption or make an incompatible server work. The client and server
+must use matching protocol, credentials, transport, WebSocket path/Host, and
+other parameters. Prefer TLS, REALITY, or VLESS Encryption when available.
+
+The patch intentionally does not change Shadowsocks. VMess continues to use
+the security method selected by the profile and Xray's VMess implementation.

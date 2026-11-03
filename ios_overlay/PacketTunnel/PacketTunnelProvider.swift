@@ -36,12 +36,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       if let error = error { return completionHandler(error) }
       guard let fd = self.tunnelFileDescriptor else { return completionHandler(self.fail("Could not find the tunnel file descriptor")) }
 
-      let request: [String: Any] = [
-        "apiVersion": 1,
-        "method": "runXray",
-        "env": ["xray.location.asset": dir.path, "xray.location.config": cfg.path, "xray.tun.fd": Int(fd)],
-        "payload": ["datDir": dir.path, "configPath": cfg.path],
-      ]
+      // libXray API 3: the config is passed as JSON text and runtime options such as the tun fd
+      // belong in the config's root `env` object (a top-level request `env` is ignored).
+      guard let raw = try? Data(contentsOf: cfg),
+            var xray = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
+        return completionHandler(self.fail("Could not read the Xray config"))
+      }
+      var env = xray["env"] as? [String: Any] ?? [:]
+      env["xray.tun.fd"] = String(fd)
+      env["xray.location.asset"] = dir.path
+      xray["env"] = env
+      guard let xrayData = try? JSONSerialization.data(withJSONObject: xray),
+            let xrayJson = String(data: xrayData, encoding: .utf8) else {
+        return completionHandler(self.fail("Could not encode the Xray config"))
+      }
+      let request: [String: Any] = ["apiVersion": 3, "method": "runXray", "payload": ["xrayJson": xrayJson]]
       guard let data = try? JSONSerialization.data(withJSONObject: request), let json = String(data: data, encoding: .utf8) else {
         return completionHandler(self.fail("Could not encode the Xray request"))
       }
@@ -59,7 +68,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
   }
 
   override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-    _ = LibXrayInvoke("{\"apiVersion\":1,\"method\":\"stopXray\"}")
+    _ = LibXrayInvoke("{\"apiVersion\":3,\"method\":\"stopXray\"}")
     completionHandler()
   }
 

@@ -284,7 +284,7 @@ class _RulesEditorState extends State<_RulesEditorPage> {
               ]),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                value: type,
+                initialValue: type,
                 decoration: const InputDecoration(labelText: 'Match', filled: true),
                 items: [for (final e in types.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
                 onChanged: (v) => setS(() => type = v ?? type),
