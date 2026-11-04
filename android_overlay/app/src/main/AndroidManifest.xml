@@ -74,16 +74,20 @@
             </intent-filter>
         </activity>
 
-        <receiver android:name=".BootReceiver" android:exported="true">
+        <!-- BOOT_COMPLETED is a system broadcast and reaches a non-exported receiver; keeping it private
+             stops other apps from sending it a fake boot intent. -->
+        <receiver android:name=".BootReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 
+        <!-- Launcher shortcuts start this through the system (LauncherApps), so it does not need to be exported.
+             Exported, any installed app could disconnect the VPN or start it with the last profile. -->
         <activity
             android:name=".ShortcutActivity"
-            android:exported="true"
+            android:exported="false"
             android:excludeFromRecents="true"
             android:taskAffinity=""
             android:theme="@android:style/Theme.NoDisplay" />

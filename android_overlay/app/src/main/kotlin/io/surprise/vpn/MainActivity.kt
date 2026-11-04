@@ -36,6 +36,24 @@ class MainActivity : FlutterFragmentActivity() {
         handleIncoming(intent, live = true)
     }
 
+    /**
+     * Only content:// URIs (the sender grants read access per URI) and .xrcfg files outside this app's private
+     * storage may be read for import. Any app can send a VIEW intent with a file:// URI, and this app would
+     * open it with its own permissions, so private files (saved profiles) must never be readable that way.
+     */
+    private fun isSafeImportUri(u: Uri): Boolean {
+        return when (u.scheme) {
+            "content" -> true
+            "file" -> {
+                val path = u.path ?: return false
+                if (!path.endsWith(".xrcfg")) return false
+                val own = java.io.File(applicationInfo.dataDir).canonicalPath
+                !java.io.File(path).canonicalPath.startsWith(own)
+            }
+            else -> false
+        }
+    }
+
     /** xrayvpn:// links, shared .xrcfg files and shared text become an import request for Dart. */
     private fun handleIncoming(i: Intent?, live: Boolean) {
         if (i == null) return
@@ -45,9 +63,10 @@ class MainActivity : FlutterFragmentActivity() {
         val uri: Uri? = i.data ?: stream
         val text: String? = when {
             uri != null && uri.scheme == "xrayvpn" -> uri.toString()
-            uri != null -> try {
+            uri != null && isSafeImportUri(uri) -> try {
                 contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText().take(2_000_000) }
             } catch (_: Exception) { null }
+            uri != null -> null
             i.action == Intent.ACTION_SEND -> i.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         }
