@@ -27,6 +27,19 @@ class LinkParser {
     return body.split(RegExp(r'[\r\n]+')).map(parse).whereType<ServerConfig>().toList();
   }
 
+  /// `host:port` (host may be a bracketed IPv6 literal, a trailing `/` is ignored).
+  static (String, int) _hostPort(String s) {
+    final t = s.replaceAll('/', '');
+    final i = t.lastIndexOf(':');
+    if (i < 0) throw const FormatException('missing port');
+    var h = t.substring(0, i);
+    if (h.startsWith('[') && h.endsWith(']')) h = h.substring(1, h.length - 1);
+    return (h, int.parse(t.substring(i + 1)));
+  }
+
+  /// Host as it must appear inside a URL authority.
+  static String _authorityHost(String h) => h.contains(':') ? '[$h]' : h;
+
   static ServerConfig _uriStyle(String s, Proto proto) {
     final u = Uri.parse(s);
     final q = u.queryParameters;
@@ -52,6 +65,10 @@ class LinkParser {
         'serviceName': q['serviceName'] ?? '',
         'mode': q['mode'] ?? '',
         'encryption': q['encryption'] ?? 'none',
+        // Certificate pinning / name check / ECH: the replacements for the removed allowInsecure.
+        'pcs': q['pcs'] ?? '',
+        'vcn': q['vcn'] ?? '',
+        'ech': q['ech'] ?? '',
       },
     );
   }
@@ -60,6 +77,7 @@ class LinkParser {
     final j = jsonDecode(utf8.decode(base64.decode(base64.normalize(s.substring(8)))))
         as Map<String, dynamic>;
     String v(String k) => (j[k] ?? '').toString();
+    final net = v('net').isEmpty ? 'tcp' : v('net');
     return ServerConfig(
       id: ServerConfig.newId(),
       name: v('ps').isEmpty ? v('add') : v('ps'),
@@ -69,11 +87,13 @@ class LinkParser {
       params: {
         'id': v('id'),
         'aid': v('aid').isEmpty ? '0' : v('aid'),
-        'net': v('net').isEmpty ? 'tcp' : v('net'),
+        'net': net,
         'security': v('tls') == 'tls' ? 'tls' : 'none',
         'sni': v('sni'),
         'fp': v('fp'),
-        'path': v('path'),
+        // v2rayN stores the gRPC service name in `path`.
+        'path': net == 'grpc' ? '' : v('path'),
+        'serviceName': net == 'grpc' ? v('path') : '',
         'host': v('host'),
         'alpn': v('alpn'),
         'method': v('scy').isEmpty ? 'auto' : v('scy'),
@@ -99,20 +119,16 @@ class LinkParser {
       if (!cred.contains(':')) {
         cred = utf8.decode(base64.decode(base64.normalize(cred)));
       }
-      final hp = rest.substring(at + 1).split(':');
+      (host, port) = _hostPort(rest.substring(at + 1));
       method = cred.substring(0, cred.indexOf(':'));
       password = Uri.decodeComponent(cred.substring(cred.indexOf(':') + 1));
-      host = hp[0];
-      port = int.parse(hp[1].replaceAll('/', ''));
     } else {
       final dec = utf8.decode(base64.decode(base64.normalize(rest)));
       final at = dec.lastIndexOf('@');
       final cred = dec.substring(0, at);
-      final hp = dec.substring(at + 1).split(':');
+      (host, port) = _hostPort(dec.substring(at + 1));
       method = cred.substring(0, cred.indexOf(':'));
       password = cred.substring(cred.indexOf(':') + 1);
-      host = hp[0];
-      port = int.parse(hp[1]);
     }
     return ServerConfig(
       id: ServerConfig.newId(),
@@ -144,32 +160,35 @@ class LinkParser {
   /// Share link for export (SSH key profiles are not exportable).
   static String? toLink(ServerConfig c) {
     String enc(String x) => Uri.encodeComponent(x);
+    final h = _authorityHost(c.host);
     switch (c.proto) {
       case Proto.vless:
       case Proto.trojan:
         final q = <String, String>{
           if (c.p('net', 'tcp') != 'tcp') 'type': c.p('net'),
           if (c.p('security', 'none') != 'none') 'security': c.p('security'),
-          for (final k in ['sni', 'fp', 'pbk', 'sid', 'spx', 'path', 'host', 'flow', 'alpn', 'serviceName', 'mode'])
+          for (final k in ['sni', 'fp', 'pbk', 'sid', 'spx', 'path', 'host', 'flow', 'alpn', 'serviceName', 'mode', 'pcs', 'vcn', 'ech'])
             if (c.p(k).isNotEmpty) k: c.p(k),
           if (c.proto == Proto.vless) 'encryption': c.p('encryption', 'none'),
         };
         final qs = q.entries.map((e) => '${e.key}=${enc(e.value)}').join('&');
-        return '${c.proto.name}://${enc(c.p('id'))}@${c.host}:${c.port}?$qs#${enc(c.name)}';
+        return '${c.proto.name}://${enc(c.p('id'))}@$h:${c.port}?$qs#${enc(c.name)}';
       case Proto.vmess:
+        final grpc = c.p('net', 'tcp') == 'grpc';
         final j = {
           'v': '2', 'ps': c.name, 'add': c.host, 'port': '${c.port}', 'id': c.p('id'),
           'aid': c.p('aid', '0'), 'scy': c.p('method', 'auto'), 'net': c.p('net', 'tcp'),
-          'type': 'none', 'host': c.p('host'), 'path': c.p('path'),
+          'type': 'none', 'host': c.p('host'), 'path': grpc ? c.p('serviceName') : c.p('path'),
           'tls': c.p('security') == 'tls' ? 'tls' : '', 'sni': c.p('sni'),
+          'fp': c.p('fp'), 'alpn': c.p('alpn'),
         };
         return 'vmess://${base64.encode(utf8.encode(jsonEncode(j)))}';
       case Proto.shadowsocks:
         final cred = base64Url.encode(utf8.encode('${c.p('method')}:${c.p('id')}')).replaceAll('=', '');
-        return 'ss://$cred@${c.host}:${c.port}#${enc(c.name)}';
+        return 'ss://$cred@$h:${c.port}#${enc(c.name)}';
       case Proto.ssh:
         if (c.p('privateKey').isNotEmpty) return null;
-        return 'ssh://${enc(c.p('user'))}:${enc(c.p('id'))}@${c.host}:${c.port}#${enc(c.name)}';
+        return 'ssh://${enc(c.p('user'))}:${enc(c.p('id'))}@$h:${c.port}#${enc(c.name)}';
     }
   }
 }

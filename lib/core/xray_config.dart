@@ -92,6 +92,26 @@ Map<String, dynamic> _deepMerge(Map<String, dynamic> base, Map<String, dynamic> 
   return out;
 }
 
+/// Transports Xray-core removed (it answers with a "removed feature" error at start-up).
+const _removedNets = {'h2', 'h3', 'http', 'quic'};
+
+/// Reports profile/setting combinations that the bundled Xray-core refuses, before the core fails with
+/// a less readable message.
+void _warnUpstreamIncompat(List<ServerConfig> profiles, AppSettings s, void Function(String message)? onWarn) {
+  if (onWarn == null) return;
+  final xray = profiles.where((p) => p.proto != Proto.ssh).toList();
+  for (final p in xray) {
+    final net = p.p('net', 'tcp').toLowerCase();
+    if (_removedNets.contains(net)) {
+      onWarn('${p.safeHost}: Xray-core removed the "$net" transport. Use XHTTP on the server and in this profile.');
+    }
+  }
+  if (s.get<bool>('allowInsecure') && xray.any((p) => p.p('security') == 'tls')) {
+    onWarn('"Allow insecure" is not sent to Xray-core, which refuses to start with it. '
+        'Pin the server certificate (pcs) or set a certificate name (vcn) on the profile instead.');
+  }
+}
+
 /// Builds the Xray-core JSON for a profile.
 ///
 /// TUN mode: Xray's own `tun` inbound consumes the file descriptor handed
@@ -103,7 +123,7 @@ Map<String, dynamic> _deepMerge(Map<String, dynamic> base, Map<String, dynamic> 
 /// [localAuth] protects those loopback inbounds with a login, so other apps on the phone cannot use the
 /// tunnel. Without it they stay open (only used for the "copy generated config" export).
 /// [onWarn] receives things that were left out or ignored on purpose (LAN sharing without a login,
-/// an invalid JSON override).
+/// an invalid JSON override, settings the Xray-core version in use refuses).
 ///
 /// [pool] adds failover/load-balancing servers (Xray balancer + observatory).
 /// [chain] sends the connection through another server first (double hop).
@@ -123,6 +143,8 @@ Map<String, dynamic> buildXrayConfig(
   final balance = pool.isNotEmpty && s.get<String>('failoverMode') != 'off' && c.proto != Proto.ssh;
   final useChain = chain != null && chain.proto != Proto.ssh && c.proto != Proto.ssh && !fragment && !balance;
   final proxyTag = balance ? 'proxy-1' : 'proxy';
+
+  _warnUpstreamIncompat([c, if (balance) ...pool, if (useChain) chain], s, onWarn);
 
   Map<String, dynamic> sniffing() {
     final over = s.get<String>('sniffOverride').split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
@@ -186,7 +208,7 @@ Map<String, dynamic> buildXrayConfig(
     _proxyOutbound(c, s, sshSocksPort, fragment, proxyTag, useChain ? 'chain' : null),
     if (balance)
       for (var i = 0; i < pool.length; i++) _proxyOutbound(pool[i], s, null, fragment, 'proxy-${i + 2}', null),
-    if (useChain) _proxyOutbound(chain!, s, null, false, 'chain', null),
+    if (useChain) _proxyOutbound(chain, s, null, false, 'chain', null),
     {'tag': 'direct', 'protocol': 'freedom'},
     {'tag': 'block', 'protocol': 'blackhole'},
     {'tag': 'dns-out', 'protocol': 'dns'},
@@ -451,11 +473,17 @@ Map<String, dynamic> _stream(ServerConfig c, AppSettings s, bool fragment, Strin
   final fp = c.p('fp').isNotEmpty ? c.p('fp') : s.get<String>('defaultFp');
   final sni = c.p('sni').isNotEmpty ? c.p('sni') : (host.isNotEmpty ? host : c.host);
   if (sec == 'tls') {
+    // The global "allowInsecure" setting is deliberately not forwarded: Xray-core aborts start-up when it is
+    // true (see _warnUpstreamIncompat). Its replacements are per profile: pcs pins the certificate, vcn
+    // verifies it against another name, ech carries an ECH config list.
+    final pcs = c.p('pcs'), vcn = c.p('vcn'), ech = c.p('ech');
     st['tlsSettings'] = {
       'serverName': sni,
-      'allowInsecure': s.get<bool>('allowInsecure'),
       if (fp.isNotEmpty) 'fingerprint': fp,
       if (c.p('alpn').isNotEmpty) 'alpn': c.p('alpn').split(','),
+      if (pcs.isNotEmpty) 'pinnedPeerCertSha256': pcs,
+      if (vcn.isNotEmpty) 'verifyPeerCertByName': vcn,
+      if (ech.isNotEmpty) 'echConfigList': ech,
     };
   } else if (sec == 'reality') {
     st['realitySettings'] = {
