@@ -40,6 +40,8 @@ class LinkParser {
   /// Host as it must appear inside a URL authority.
   static String _authorityHost(String h) => h.contains(':') ? '[$h]' : h;
 
+  static bool _truthy(String? v) => v == '1' || v?.toLowerCase() == 'true';
+
   static ServerConfig _uriStyle(String s, Proto proto) {
     final u = Uri.parse(s);
     final q = u.queryParameters;
@@ -52,6 +54,8 @@ class LinkParser {
       params: {
         'id': Uri.decodeComponent(u.userInfo),
         'net': q['type'] ?? 'tcp',
+        // An explicit security=none (plain VLESS/Trojan/VMess, e.g. WebSocket on port 80) is kept as none. Only a
+        // Trojan link without any security parameter is read as TLS, because that is what such links mean.
         'security': q['security'] ?? (proto == Proto.trojan ? 'tls' : 'none'),
         'sni': q['sni'] ?? q['peer'] ?? '',
         'fp': q['fp'] ?? '',
@@ -65,10 +69,11 @@ class LinkParser {
         'serviceName': q['serviceName'] ?? '',
         'mode': q['mode'] ?? '',
         'encryption': q['encryption'] ?? 'none',
-        // Certificate pinning / name check / ECH: the replacements for the removed allowInsecure.
+        // Certificate pinning / name check / ECH, and the legacy allowInsecure=1 that v2rayN-style links carry.
         'pcs': q['pcs'] ?? '',
         'vcn': q['vcn'] ?? '',
         'ech': q['ech'] ?? '',
+        'allowInsecure': (_truthy(q['allowInsecure']) || _truthy(q['insecure'])) ? '1' : '',
       },
     );
   }
@@ -97,6 +102,7 @@ class LinkParser {
         'host': v('host'),
         'alpn': v('alpn'),
         'method': v('scy').isEmpty ? 'auto' : v('scy'),
+        'allowInsecure': (_truthy(v('allowInsecure')) || _truthy(v('insecure'))) ? '1' : '',
       },
     );
   }
@@ -166,8 +172,9 @@ class LinkParser {
       case Proto.trojan:
         final q = <String, String>{
           if (c.p('net', 'tcp') != 'tcp') 'type': c.p('net'),
-          if (c.p('security', 'none') != 'none') 'security': c.p('security'),
-          for (final k in ['sni', 'fp', 'pbk', 'sid', 'spx', 'path', 'host', 'flow', 'alpn', 'serviceName', 'mode', 'pcs', 'vcn', 'ech'])
+          // Always written for Trojan, so a plain (security=none) profile does not come back as TLS on import.
+          if (c.p('security', 'none') != 'none' || c.proto == Proto.trojan) 'security': c.p('security', 'none'),
+          for (final k in ['sni', 'fp', 'pbk', 'sid', 'spx', 'path', 'host', 'flow', 'alpn', 'serviceName', 'mode', 'pcs', 'vcn', 'ech', 'allowInsecure'])
             if (c.p(k).isNotEmpty) k: c.p(k),
           if (c.proto == Proto.vless) 'encryption': c.p('encryption', 'none'),
         };
@@ -181,6 +188,7 @@ class LinkParser {
           'type': 'none', 'host': c.p('host'), 'path': grpc ? c.p('serviceName') : c.p('path'),
           'tls': c.p('security') == 'tls' ? 'tls' : '', 'sni': c.p('sni'),
           'fp': c.p('fp'), 'alpn': c.p('alpn'),
+          if (c.p('allowInsecure') == '1') 'allowInsecure': '1',
         };
         return 'vmess://${base64.encode(utf8.encode(jsonEncode(j)))}';
       case Proto.shadowsocks:

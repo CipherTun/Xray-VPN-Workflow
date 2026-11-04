@@ -17,6 +17,7 @@ set +a
 WORK="${WORK:-$ROOT/.cores}"
 
 # libXray tags follow the Xray-core version they embed, so checking out LIBXRAY_TAG is enough.
+# NOTE: this iOS build does NOT contain the CipherTun compatibility patches (allowInsecure, plaintext VLESS/Trojan).
 build_libxray() {
   mkdir -p "$WORK" && cd "$WORK"
   [ -d libXray ] || git clone https://github.com/XTLS/libXray.git
@@ -27,7 +28,7 @@ build_libxray() {
 
 case "${1:-}" in
   android)
-    "$ROOT/scripts/ci_fetch_core.sh"
+    bash "$ROOT/scripts/ci_fetch_core.sh"
     mkdir -p "$ROOT/android/app/libs"
     cp -v "$ROOT/android-libs/libv2ray.aar" "$ROOT/android/app/libs/libv2ray.aar"
     ;;

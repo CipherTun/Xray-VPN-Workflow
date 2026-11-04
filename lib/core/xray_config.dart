@@ -95,20 +95,15 @@ Map<String, dynamic> _deepMerge(Map<String, dynamic> base, Map<String, dynamic> 
 /// Transports Xray-core removed (it answers with a "removed feature" error at start-up).
 const _removedNets = {'h2', 'h3', 'http', 'quic'};
 
-/// Reports profile/setting combinations that the bundled Xray-core refuses, before the core fails with
-/// a less readable message.
-void _warnUpstreamIncompat(List<ServerConfig> profiles, AppSettings s, void Function(String message)? onWarn) {
+/// Reports profile settings that the bundled Xray-core refuses, before the core fails with a less readable message.
+/// ("allowInsecure" is not one of them: scripts/patch_xray_allow_insecure.py restores it in the core build.)
+void _warnUpstreamIncompat(List<ServerConfig> profiles, void Function(String message)? onWarn) {
   if (onWarn == null) return;
-  final xray = profiles.where((p) => p.proto != Proto.ssh).toList();
-  for (final p in xray) {
+  for (final p in profiles.where((p) => p.proto != Proto.ssh)) {
     final net = p.p('net', 'tcp').toLowerCase();
     if (_removedNets.contains(net)) {
       onWarn('${p.safeHost}: Xray-core removed the "$net" transport. Use XHTTP on the server and in this profile.');
     }
-  }
-  if (s.get<bool>('allowInsecure') && xray.any((p) => p.p('security') == 'tls')) {
-    onWarn('"Allow insecure" is not sent to Xray-core, which refuses to start with it. '
-        'Pin the server certificate (pcs) or set a certificate name (vcn) on the profile instead.');
   }
 }
 
@@ -123,7 +118,7 @@ void _warnUpstreamIncompat(List<ServerConfig> profiles, AppSettings s, void Func
 /// [localAuth] protects those loopback inbounds with a login, so other apps on the phone cannot use the
 /// tunnel. Without it they stay open (only used for the "copy generated config" export).
 /// [onWarn] receives things that were left out or ignored on purpose (LAN sharing without a login,
-/// an invalid JSON override, settings the Xray-core version in use refuses).
+/// an invalid JSON override, transports the Xray-core version in use refuses).
 ///
 /// [pool] adds failover/load-balancing servers (Xray balancer + observatory).
 /// [chain] sends the connection through another server first (double hop).
@@ -144,7 +139,7 @@ Map<String, dynamic> buildXrayConfig(
   final useChain = chain != null && chain.proto != Proto.ssh && c.proto != Proto.ssh && !fragment && !balance;
   final proxyTag = balance ? 'proxy-1' : 'proxy';
 
-  _warnUpstreamIncompat([c, if (balance) ...pool, if (useChain) chain], s, onWarn);
+  _warnUpstreamIncompat([c, if (balance) ...pool, if (useChain) chain], onWarn);
 
   Map<String, dynamic> sniffing() {
     final over = s.get<String>('sniffOverride').split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
@@ -473,12 +468,14 @@ Map<String, dynamic> _stream(ServerConfig c, AppSettings s, bool fragment, Strin
   final fp = c.p('fp').isNotEmpty ? c.p('fp') : s.get<String>('defaultFp');
   final sni = c.p('sni').isNotEmpty ? c.p('sni') : (host.isNotEmpty ? host : c.host);
   if (sec == 'tls') {
-    // The global "allowInsecure" setting is deliberately not forwarded: Xray-core aborts start-up when it is
-    // true (see _warnUpstreamIncompat). Its replacements are per profile: pcs pins the certificate, vcn
-    // verifies it against another name, ech carries an ECH config list.
+    // allowInsecure (global setting or the profile's own flag, e.g. from a link with allowInsecure=1) needs the
+    // core built by scripts/ci_fetch_core.sh: stock Xray-core refuses it. pcs pins the certificate (and wins over
+    // allowInsecure), vcn verifies it against another name, ech carries an ECH config list.
+    final insecure = s.get<bool>('allowInsecure') || c.p('allowInsecure') == '1';
     final pcs = c.p('pcs'), vcn = c.p('vcn'), ech = c.p('ech');
     st['tlsSettings'] = {
       'serverName': sni,
+      if (insecure) 'allowInsecure': true,
       if (fp.isNotEmpty) 'fingerprint': fp,
       if (c.p('alpn').isNotEmpty) 'alpn': c.p('alpn').split(','),
       if (pcs.isNotEmpty) 'pinnedPeerCertSha256': pcs,
