@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build AndroidLibXrayLite against pinned Xray-core with CipherTun legacy plaintext compatibility.
+# Build AndroidLibXrayLite against pinned Xray-core with CipherTun legacy compatibility patches:
+#   patch_xray_core.py            plaintext VLESS/Trojan/VMess to any server (upstream rejects them)
+#   patch_xray_allow_insecure.py  "allowInsecure" works again (upstream removed it)
 # Every version pin lives in scripts/versions.env.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +21,7 @@ valid() {
     unzip -l "$1" | grep -q 'classes.jar' &&
     unzip -l "$1" | grep -q 'libgojni.so'
 }
-# Upstream prebuilt AARs do not contain CipherTun's compatibility patch.
+# Upstream prebuilt AARs do not contain CipherTun's compatibility patches.
 rm -f "$OUT/libv2ray.aar"
 cd "$WORK"
 rm -rf core-src
@@ -30,6 +32,7 @@ rm -rf xray-core
 git clone "https://github.com/$XRAY_REPO.git" xray-core
 git -C xray-core checkout "$XRAY_COMMIT"
 python3 "$ROOT/scripts/patch_xray_core.py" "$WORK/core-src/xray-core"
+python3 "$ROOT/scripts/patch_xray_allow_insecure.py" "$WORK/core-src/xray-core"
 go mod edit -replace="github.com/xtls/xray-core=./xray-core"
 export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
 export GOFLAGS="${GOFLAGS:--mod=mod}"
