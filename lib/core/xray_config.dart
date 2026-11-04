@@ -100,6 +100,11 @@ Map<String, dynamic> _deepMerge(Map<String, dynamic> base, Map<String, dynamic> 
 /// is exposed as well so the Tools tab can test traffic through the tunnel
 /// (the app itself is excluded from the VPN to avoid routing loops).
 ///
+/// [localAuth] protects those loopback inbounds with a login, so other apps on the phone cannot use the
+/// tunnel. Without it they stay open (only used for the "copy generated config" export).
+/// [onWarn] receives things that were left out or ignored on purpose (LAN sharing without a login,
+/// an invalid JSON override).
+///
 /// [pool] adds failover/load-balancing servers (Xray balancer + observatory).
 /// [chain] sends the connection through another server first (double hop).
 Map<String, dynamic> buildXrayConfig(
@@ -108,6 +113,8 @@ Map<String, dynamic> buildXrayConfig(
   int? sshSocksPort,
   List<ServerConfig> pool = const [],
   ServerConfig? chain,
+  ({String user, String pass})? localAuth,
+  void Function(String message)? onWarn,
 }) {
   final socksPort = s.get<int>('socksPort');
   final routing = s.get<String>('routing');
@@ -166,9 +173,14 @@ Map<String, dynamic> buildXrayConfig(
   final dnsStrat = s.get<String>('dnsStrategy');
   final strategy = dnsStrat == 'auto' ? (s.get<bool>('ipv6') ? 'UseIP' : 'UseIPv4') : dnsStrat;
 
-  final lanListen = s.get<bool>('allowLan');
+  // Sharing the tunnel with other devices is only ever opened with a login: an open proxy on the
+  // local network (or a hotspot) would let anyone nearby use the connection.
+  final lanWanted = s.get<bool>('allowLan');
   final user = s.get<String>('localUser'), pass = s.get<String>('localPass');
-  final lanAuth = lanListen && user.isNotEmpty && pass.isNotEmpty;
+  final lanListen = lanWanted && user.isNotEmpty && pass.isNotEmpty;
+  if (lanWanted && !lanListen) {
+    onWarn?.call('LAN sharing is off: set a username and password for it first.');
+  }
 
   final outbounds = <Map<String, dynamic>>[
     _proxyOutbound(c, s, sshSocksPort, fragment, proxyTag, useChain ? 'chain' : null),
@@ -191,6 +203,9 @@ Map<String, dynamic> buildXrayConfig(
         },
       },
   ];
+
+  final failoverMode = s.get<String>('failoverMode');
+  final probe = '${s.get<int>('probeSeconds')}s';
 
   final cfg = <String, dynamic>{
     'log': {'loglevel': s.get<String>('logLevel')},
@@ -221,7 +236,11 @@ Map<String, dynamic> buildXrayConfig(
         'listen': '127.0.0.1',
         'port': socksPort,
         'protocol': 'socks',
-        'settings': {'udp': true, 'auth': 'noauth'},
+        'settings': {
+          'udp': true,
+          'auth': localAuth == null ? 'noauth' : 'password',
+          if (localAuth != null) 'accounts': [{'user': localAuth.user, 'pass': localAuth.pass}],
+        },
         'sniffing': sniffing(),
       },
       {
@@ -229,9 +248,10 @@ Map<String, dynamic> buildXrayConfig(
         'listen': '127.0.0.1',
         'port': socksPort + 1,
         'protocol': 'http',
+        if (localAuth != null) 'settings': {'accounts': [{'user': localAuth.user, 'pass': localAuth.pass}]},
         'sniffing': sniffing(),
       },
-      // Optional: share the tunnel with other devices on the same Wi-Fi / hotspot.
+      // Optional: share the tunnel with other devices on the same Wi-Fi / hotspot (login required).
       if (lanListen) ...[
         {
           'tag': 'lan-socks',
@@ -240,8 +260,8 @@ Map<String, dynamic> buildXrayConfig(
           'protocol': 'socks',
           'settings': {
             'udp': true,
-            'auth': lanAuth ? 'password' : 'noauth',
-            if (lanAuth) 'accounts': [{'user': user, 'pass': pass}],
+            'auth': 'password',
+            'accounts': [{'user': user, 'pass': pass}],
           },
           'sniffing': sniffing(),
         },
@@ -250,7 +270,7 @@ Map<String, dynamic> buildXrayConfig(
           'listen': '0.0.0.0',
           'port': socksPort + 11,
           'protocol': 'http',
-          'settings': {if (lanAuth) 'accounts': [{'user': user, 'pass': pass}]},
+          'settings': {'accounts': [{'user': user, 'pass': pass}]},
           'sniffing': sniffing(),
         },
       ],
@@ -264,15 +284,26 @@ Map<String, dynamic> buildXrayConfig(
           {
             'tag': 'proxy-balance',
             'selector': ['proxy-'],
-            'strategy': {'type': s.get<String>('failoverMode')},
+            'strategy': {'type': failoverMode},
           }
         ],
     },
-    if (balance && s.get<String>('failoverMode') == 'leastPing')
+    if (balance && failoverMode == 'leastPing')
       'observatory': {
         'subjectSelector': ['proxy-'],
         'probeURL': 'https://www.gstatic.com/generate_204',
-        'probeInterval': '${s.get<int>('probeSeconds')}s',
+        'probeInterval': probe,
+      },
+    // leastLoad needs the burst observatory, otherwise Xray has no latency data to balance with.
+    if (balance && failoverMode == 'leastLoad')
+      'burstObservatory': {
+        'subjectSelector': ['proxy-'],
+        'pingConfig': {
+          'destination': 'https://www.gstatic.com/generate_204',
+          'interval': probe,
+          'sampling': 3,
+          'timeout': '5s',
+        },
       },
   };
 
@@ -281,7 +312,10 @@ Map<String, dynamic> buildXrayConfig(
     try {
       final j = _tryDecode(over);
       if (j != null) return _deepMerge(cfg, j);
-    } catch (_) {}
+      onWarn?.call('The Xray JSON override was ignored: it must be a JSON object.');
+    } catch (e) {
+      onWarn?.call('The Xray JSON override was ignored: $e');
+    }
   }
   return cfg;
 }

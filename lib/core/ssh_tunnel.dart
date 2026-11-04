@@ -11,6 +11,8 @@ import 'ssh_payload.dart';
 
 typedef SshLog = void Function(String level, String msg);
 
+String _hex(List<int> bytes) => bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
 /// A plain TCP/TLS socket as an [SSHSocket]. DartSSH2 lets us supply any transport,
 /// which is how the TLS-with-custom-SNI and HTTP-payload modes below are implemented.
 class _NetSocket implements SSHSocket {
@@ -62,49 +64,64 @@ class SshTunnel {
     final timeout = Duration(seconds: s.get<int>('sshConnectTimeout'));
     final port = s.get<int>('sshLocalPort') > 0 ? s.get<int>('sshLocalPort') : s.get<int>('socksPort') + 2;
 
-    SSHSocket socket;
-    if (jump != null) {
-      log('info', 'SSH: connecting through jump host ${jump.safeHost}');
-      final jc = await _login(jump, s, prefs, log, await _open(jump, s, timeout, log));
-      _jump = jc;
-      await jc.authenticated;
-      log('info', 'SSH: jump host authenticated');
-      socket = await jc.forwardLocal(c.host, c.port);
-    } else {
-      log('info', 'SSH: connecting to ${c.locked ? 'locked server' : '${c.host}:${c.port}'} (${c.p('transport', 'direct')})');
-      socket = await _open(c, s, timeout, log);
+    // A transport that no SSHClient owns yet. If anything below throws it is destroyed, so a failed
+    // connect never leaves a half-open socket behind.
+    SSHSocket? pending;
+    try {
+      if (jump != null) {
+        log('info', 'SSH: connecting through jump host ${jump.safeHost}');
+        final jumpSocket = await _open(jump, s, timeout, log);
+        pending = jumpSocket;
+        final jc = await _login(jump, s, prefs, log, jumpSocket);
+        pending = null;
+        _jump = jc;
+        await jc.authenticated.timeout(timeout);
+        log('info', 'SSH: jump host authenticated');
+        pending = await jc.forwardLocal(c.host, c.port);
+      } else {
+        log('info', 'SSH: connecting to ${c.locked ? 'locked server' : '${c.host}:${c.port}'} (${c.p('transport', 'direct')})');
+        pending = await _open(c, s, timeout, log);
+      }
+
+      final transport = pending;
+      final client = await _login(c, s, prefs, log, transport);
+      pending = null;
+      _client = client;
+      await client.authenticated.timeout(timeout);
+      log('info', c.locked ? 'SSH: authenticated' : 'SSH: authenticated as ${c.p('user', 'root')}');
+
+      _forward = await client.forwardDynamic(
+        bindHost: '127.0.0.1',
+        bindPort: port,
+        options: SSHDynamicForwardOptions(
+          handshakeTimeout: const Duration(seconds: 10),
+          connectTimeout: timeout,
+          maxConnections: s.get<int>('sshMaxConnections'),
+        ),
+      );
+      log('info', 'SSH: SOCKS5 listening on 127.0.0.1:$port');
+
+      client.done.then((_) {
+        if (identical(_client, client)) {
+          _client = null;
+          log('warn', 'SSH: session closed');
+          onDropped?.call();
+        }
+      }).catchError((Object e) {
+        if (identical(_client, client)) {
+          _client = null;
+          log('error', 'SSH: $e');
+          onDropped?.call();
+        }
+      });
+      return port;
+    } catch (_) {
+      try {
+        pending?.destroy();
+      } catch (_) {}
+      await stop();
+      rethrow;
     }
-
-    final client = await _login(c, s, prefs, log, socket);
-    _client = client;
-    await client.authenticated.timeout(timeout);
-    log('info', c.locked ? 'SSH: authenticated' : 'SSH: authenticated as ${c.p('user', 'root')}');
-
-    _forward = await client.forwardDynamic(
-      bindHost: '127.0.0.1',
-      bindPort: port,
-      options: SSHDynamicForwardOptions(
-        handshakeTimeout: const Duration(seconds: 10),
-        connectTimeout: timeout,
-        maxConnections: s.get<int>('sshMaxConnections'),
-      ),
-    );
-    log('info', 'SSH: SOCKS5 listening on 127.0.0.1:$port');
-
-    client.done.then((_) {
-      if (identical(_client, client)) {
-        _client = null;
-        log('warn', 'SSH: session closed');
-        onDropped?.call();
-      }
-    }).catchError((Object e) {
-      if (identical(_client, client)) {
-        _client = null;
-        log('error', 'SSH: $e');
-        onDropped?.call();
-      }
-    });
-    return port;
   }
 
   // ───────── transports ─────────
@@ -114,15 +131,20 @@ class SshTunnel {
     switch (c.p('transport', 'direct')) {
       case 'tls':
         final raw = await Socket.connect(c.host, c.port, timeout: timeout);
-        if (noDelay) raw.setOption(SocketOption.tcpNoDelay, true);
-        final sni = c.p('sni', c.host);
-        final tls = await SecureSocket.secure(
-          raw,
-          host: sni,
-          onBadCertificate: (_) => c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
-        ).timeout(timeout);
-        log('info', 'SSH: TLS established${c.locked ? '' : ' (SNI $sni)'}');
-        return _NetSocket(tls);
+        try {
+          if (noDelay) raw.setOption(SocketOption.tcpNoDelay, true);
+          final sni = c.p('sni', c.host);
+          final tls = await SecureSocket.secure(
+            raw,
+            host: sni,
+            onBadCertificate: (_) => c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
+          ).timeout(timeout);
+          log('info', 'SSH: TLS established${c.locked ? '' : ' (SNI $sni)'}');
+          return _NetSocket(tls);
+        } catch (_) {
+          raw.destroy();
+          rethrow;
+        }
       case 'http':
         return _httpConnect(c, s, timeout, log, noDelay);
       default:
@@ -144,108 +166,118 @@ class SshTunnel {
     final useTls = pp.sni != null || pp.forceTls || (!pp.forcePlain && tlsPorts.contains(proxyPort));
 
     Socket sock = await Socket.connect(proxyHost, proxyPort, timeout: timeout);
-    if (noDelay) sock.setOption(SocketOption.tcpNoDelay, true);
-    if (useTls) {
-      final sni = pp.sni ?? pp.hostHeader ?? proxyHost;
-      sock = await SecureSocket.secure(
-        sock,
-        host: sni,
-        onBadCertificate: (_) => c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
-      ).timeout(timeout);
-      log('info', 'SSH: TLS to the proxy established${c.locked ? '' : ' (SNI $sni)'}');
-    }
-
     final ctl = StreamController<Uint8List>();
     final ready = Completer<bool>(); // value: true when the tunnel is WebSocket-framed
-    final buf = <int>[];
-    final expected = pp.methods.isEmpty ? 1 : pp.methods.length;
-    var blocks = 0, skip = 0;
-    var passthrough = false, ws = false;
-    WsDecoder? decoder;
+    // Failures reach the caller through the await below; never let an early one count as unhandled.
+    ready.future.ignore();
 
-    int endOfHeaders() {
-      for (var i = 0; i + 3 < buf.length; i++) {
-        if (buf[i] == 13 && buf[i + 1] == 10 && buf[i + 2] == 13 && buf[i + 3] == 10) return i;
+    try {
+      if (noDelay) sock.setOption(SocketOption.tcpNoDelay, true);
+      if (useTls) {
+        final sni = pp.sni ?? pp.hostHeader ?? proxyHost;
+        sock = await SecureSocket.secure(
+          sock,
+          host: sni,
+          onBadCertificate: (_) => c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
+        ).timeout(timeout);
+        log('info', 'SSH: TLS to the proxy established${c.locked ? '' : ' (SNI $sni)'}');
       }
-      return -1;
-    }
 
-    void startStream(bool framed) {
-      passthrough = true;
-      ws = framed;
-      if (framed) decoder = WsDecoder(ctl, (frame) => sock.add(frame));
-      final rest = Uint8List.fromList(buf);
-      buf.clear();
-      if (rest.isNotEmpty) framed ? decoder!.add(rest) : ctl.add(rest);
-      if (!ready.isCompleted) ready.complete(framed);
-    }
+      final buf = <int>[];
+      final expected = pp.methods.isEmpty ? 1 : pp.methods.length;
+      var blocks = 0, skip = 0;
+      var passthrough = false, ws = false;
+      WsDecoder? decoder;
 
-    void process() {
-      while (!passthrough) {
-        if (skip > 0) {
-          final n = skip < buf.length ? skip : buf.length;
-          buf.removeRange(0, n);
-          skip -= n;
-          if (skip > 0) return;
-          if (blocks >= expected) return startStream(false);
-          continue;
+      int endOfHeaders() {
+        for (var i = 0; i + 3 < buf.length; i++) {
+          if (buf[i] == 13 && buf[i + 1] == 10 && buf[i + 2] == 13 && buf[i + 3] == 10) return i;
         }
-        // Some servers answer with the SSH banner straight away, no HTTP at all.
-        if (buf.length >= 4 && buf[0] == 0x53 && buf[1] == 0x53 && buf[2] == 0x48 && buf[3] == 0x2D) return startStream(false);
-        final i = endOfHeaders();
-        if (i < 0) return;
-        final head = latin1.decode(buf.sublist(0, i));
-        buf.removeRange(0, i + 4);
-        final first = head.split('\r\n').first;
-        final code = int.tryParse(first.split(' ').skip(1).firstOrNull ?? '') ?? 0;
-        if (!first.startsWith('HTTP/')) {
-          if (!ready.isCompleted) ready.completeError('Unexpected reply from the proxy');
+        return -1;
+      }
+
+      void startStream(bool framed) {
+        passthrough = true;
+        ws = framed;
+        if (framed) decoder = WsDecoder(ctl, (frame) => sock.add(frame));
+        final rest = Uint8List.fromList(buf);
+        buf.clear();
+        if (rest.isNotEmpty) framed ? decoder!.add(rest) : ctl.add(rest);
+        if (!ready.isCompleted) ready.complete(framed);
+      }
+
+      void process() {
+        while (!passthrough) {
+          if (skip > 0) {
+            final n = skip < buf.length ? skip : buf.length;
+            buf.removeRange(0, n);
+            skip -= n;
+            if (skip > 0) return;
+            if (blocks >= expected) return startStream(false);
+            continue;
+          }
+          // Some servers answer with the SSH banner straight away, no HTTP at all.
+          if (buf.length >= 4 && buf[0] == 0x53 && buf[1] == 0x53 && buf[2] == 0x48 && buf[3] == 0x2D) return startStream(false);
+          final i = endOfHeaders();
+          if (i < 0) return;
+          final head = latin1.decode(buf.sublist(0, i));
+          buf.removeRange(0, i + 4);
+          final first = head.split('\r\n').first;
+          final code = int.tryParse(first.split(' ').skip(1).firstOrNull ?? '') ?? 0;
+          if (!first.startsWith('HTTP/')) {
+            if (!ready.isCompleted) ready.completeError('Unexpected reply from the proxy');
+            return;
+          }
+          if (!c.locked) log('info', 'SSH: proxy replied $first');
+          final method = blocks < pp.methods.length ? pp.methods[blocks] : '';
+          blocks++;
+          if (code == 101) return startStream(head.toLowerCase().contains('sec-websocket-accept'));
+          if (code >= 200 && code < 300) {
+            final cl = RegExp(r'content-length:\s*(\d+)', caseSensitive: false).firstMatch(head);
+            if (cl != null && method != 'CONNECT') skip = int.parse(cl[1]!);
+            if (skip == 0 && blocks >= expected) return startStream(false);
+            continue;
+          }
+          if (!ready.isCompleted) ready.completeError('The proxy answered: $first');
           return;
         }
-        if (!c.locked) log('info', 'SSH: proxy replied $first');
-        final method = blocks < pp.methods.length ? pp.methods[blocks] : '';
-        blocks++;
-        if (code == 101) return startStream(head.toLowerCase().contains('sec-websocket-accept'));
-        if (code >= 200 && code < 300) {
-          final cl = RegExp(r'content-length:\s*(\d+)', caseSensitive: false).firstMatch(head);
-          if (cl != null && method != 'CONNECT') skip = int.parse(cl[1]!);
-          if (skip == 0 && blocks >= expected) return startStream(false);
-          continue;
-        }
-        if (!ready.isCompleted) ready.completeError('The proxy answered: $first');
-        return;
       }
+
+      sock.listen(
+        (d) {
+          if (passthrough) {
+            ws ? decoder!.add(d) : ctl.add(d);
+            return;
+          }
+          buf.addAll(d);
+          process();
+        },
+        onError: (Object e) {
+          if (!ready.isCompleted) ready.completeError(e);
+          if (!ctl.isClosed) ctl.addError(e);
+        },
+        onDone: () {
+          if (!ready.isCompleted) ready.completeError('The proxy closed the connection before the tunnel was open');
+          if (!ctl.isClosed) ctl.close();
+        },
+        cancelOnError: false,
+      );
+
+      for (var i = 0; i < pp.parts.length; i++) {
+        sock.add(utf8.encode(pp.parts[i].text));
+        await sock.flush();
+        if (pp.parts[i].delayMs > 0 && i < pp.parts.length - 1) await Future<void>.delayed(Duration(milliseconds: pp.parts[i].delayMs));
+      }
+
+      final framed = await ready.future.timeout(timeout);
+      log('info', framed ? 'SSH: WebSocket tunnel established' : 'SSH: HTTP proxy tunnel established');
+      return _NetSocket(sock, ctl.stream, framed ? WsSink(sock) : null);
+    } catch (_) {
+      // Timeout, bad reply or TLS failure: do not leave the connection open.
+      sock.destroy();
+      if (!ctl.isClosed) unawaited(ctl.close());
+      rethrow;
     }
-
-    sock.listen(
-      (d) {
-        if (passthrough) {
-          ws ? decoder!.add(d) : ctl.add(d);
-          return;
-        }
-        buf.addAll(d);
-        process();
-      },
-      onError: (Object e) {
-        if (!ready.isCompleted) ready.completeError(e);
-        if (!ctl.isClosed) ctl.addError(e);
-      },
-      onDone: () {
-        if (!ready.isCompleted) ready.completeError('The proxy closed the connection before the tunnel was open');
-        if (!ctl.isClosed) ctl.close();
-      },
-      cancelOnError: false,
-    );
-
-    for (var i = 0; i < pp.parts.length; i++) {
-      sock.add(utf8.encode(pp.parts[i].text));
-      await sock.flush();
-      if (pp.parts[i].delayMs > 0 && i < pp.parts.length - 1) await Future<void>.delayed(Duration(milliseconds: pp.parts[i].delayMs));
-    }
-
-    final framed = await ready.future.timeout(timeout);
-    log('info', framed ? 'SSH: WebSocket tunnel established' : 'SSH: HTTP proxy tunnel established');
-    return _NetSocket(sock, ctl.stream, framed ? WsSink(sock) : null);
   }
 
   // ───────── authentication + host keys ─────────
@@ -263,9 +295,10 @@ class SshTunnel {
       authTimeout: Duration(seconds: s.get<int>('sshConnectTimeout')),
       onVerifyHostKey: (type, fingerprint) {
         if (policy == 'off') return true;
-        // DartSSH2 hands over the OpenSSH-style SHA256 fingerprint (bytes in some releases, text in others).
+        // DartSSH2 hands over the host key fingerprint as text in some releases and as raw digest bytes in
+        // others. Digest bytes are binary, not UTF-8, so they are hex-encoded instead of decoded.
         final Object raw = fingerprint;
-        final fp = raw is String ? raw : utf8.decode(raw as List<int>);
+        final fp = raw is String ? raw : _hex(raw as List<int>);
         final id = '${c.host}:${c.port}';
         final known = prefs.getString('hostkey:$id');
         if (known != null) {
