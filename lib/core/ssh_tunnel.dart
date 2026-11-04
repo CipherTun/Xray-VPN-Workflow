@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha1;
 import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -167,8 +168,9 @@ class SshTunnel {
 
     Socket sock = await Socket.connect(proxyHost, proxyPort, timeout: timeout);
     final ctl = StreamController<Uint8List>();
-    final ready = Completer<bool>(); // value: true when the tunnel is WebSocket-framed
-    // Failures reach the caller through the await below; never let an early one count as unhandled.
+    final ready = Completer<bool>(); // true means WebSocket-framed transport.
+
+    // Avoid an unhandled asynchronous error if the socket fails before ready is awaited.
     ready.future.ignore();
 
     try {
@@ -178,20 +180,29 @@ class SshTunnel {
         sock = await SecureSocket.secure(
           sock,
           host: sni,
-          onBadCertificate: (_) => c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
+          onBadCertificate: (_) =>
+              c.p('tlsInsecure') == '1' || s.get<bool>('allowInsecure'),
         ).timeout(timeout);
         log('info', 'SSH: TLS to the proxy established${c.locked ? '' : ' (SNI $sni)'}');
       }
 
       final buf = <int>[];
       final expected = pp.methods.isEmpty ? 1 : pp.methods.length;
-      var blocks = 0, skip = 0;
-      var passthrough = false, ws = false;
+      var blocks = 0;
+      var skip = 0;
+      var passthrough = false;
+      var ws = false;
+      var payloadRedirectCandidate = false;
       WsDecoder? decoder;
 
       int endOfHeaders() {
         for (var i = 0; i + 3 < buf.length; i++) {
-          if (buf[i] == 13 && buf[i + 1] == 10 && buf[i + 2] == 13 && buf[i + 3] == 10) return i;
+          if (buf[i] == 13 &&
+              buf[i + 1] == 10 &&
+              buf[i + 2] == 13 &&
+              buf[i + 3] == 10) {
+            return i;
+          }
         }
         return -1;
       }
@@ -199,10 +210,18 @@ class SshTunnel {
       void startStream(bool framed) {
         passthrough = true;
         ws = framed;
-        if (framed) decoder = WsDecoder(ctl, (frame) => sock.add(frame));
+        if (framed) {
+          decoder = WsDecoder(ctl, (frame) => sock.add(frame));
+        }
         final rest = Uint8List.fromList(buf);
         buf.clear();
-        if (rest.isNotEmpty) framed ? decoder!.add(rest) : ctl.add(rest);
+        if (rest.isNotEmpty) {
+          if (framed) {
+            decoder!.add(rest);
+          } else {
+            ctl.add(rest);
+          }
+        }
         if (!ready.isCompleted) ready.complete(framed);
       }
 
@@ -216,48 +235,194 @@ class SshTunnel {
             if (blocks >= expected) return startStream(false);
             continue;
           }
-          // Some servers answer with the SSH banner straight away, no HTTP at all.
-          if (buf.length >= 4 && buf[0] == 0x53 && buf[1] == 0x53 && buf[2] == 0x48 && buf[3] == 0x2D) return startStream(false);
-          final i = endOfHeaders();
-          if (i < 0) return;
-          final head = latin1.decode(buf.sublist(0, i));
-          buf.removeRange(0, i + 4);
+
+          // Some servers send the SSH banner directly without an HTTP response.
+          if (buf.length >= 4 &&
+              buf[0] == 0x53 &&
+              buf[1] == 0x53 &&
+              buf[2] == 0x48 &&
+              buf[3] == 0x2D) {
+            return startStream(false);
+          }
+
+          final headerEnd = endOfHeaders();
+          if (headerEnd < 0) return;
+
+          final head = latin1.decode(buf.sublist(0, headerEnd));
+          buf.removeRange(0, headerEnd + 4);
+
           final first = head.split('\r\n').first;
-          final code = int.tryParse(first.split(' ').skip(1).firstOrNull ?? '') ?? 0;
+          final code =
+              int.tryParse(first.split(' ').skip(1).firstOrNull ?? '') ?? 0;
+
           if (!first.startsWith('HTTP/')) {
-            if (!ready.isCompleted) ready.completeError('Unexpected reply from the proxy');
+            if (!ready.isCompleted) {
+              ready.completeError('Unexpected reply from the proxy');
+            }
             return;
           }
+
           if (!c.locked) log('info', 'SSH: proxy replied $first');
-          final method = blocks < pp.methods.length ? pp.methods[blocks] : '';
+
+          // Interim responses do not complete a payload request.
+          if (code >= 100 && code < 200 && code != 101) continue;
+
+          // Count only final responses so the request index remains aligned.
+          final responseIndex = blocks;
+          final method = responseIndex < pp.methods.length
+              ? pp.methods[responseIndex]
+              : '';
           blocks++;
-          if (code == 101) return startStream(head.toLowerCase().contains('sec-websocket-accept'));
+
+          if (code == 101) {
+            final upgradeMatch = RegExp(
+              r'(^|\r\n)upgrade:\s*([^\r\n]+)',
+              caseSensitive: false,
+            ).firstMatch(head);
+
+            final connectionUpgrade = RegExp(
+              r'(^|\r\n)connection:.*\bupgrade\b',
+              caseSensitive: false,
+            ).hasMatch(head);
+
+            if (upgradeMatch == null || !connectionUpgrade) {
+              if (!ready.isCompleted) {
+                ready.completeError(
+                  'Invalid 101 response: missing Upgrade or Connection: Upgrade header',
+                );
+              }
+              return;
+            }
+
+            final upgradeProtocol = upgradeMatch[2]!.trim().toLowerCase();
+            final websocketFramed = upgradeProtocol == 'websocket';
+
+            if (websocketFramed) {
+              final requestKey = responseIndex < pp.webSocketKeys.length
+                  ? pp.webSocketKeys[responseIndex]
+                  : null;
+
+              final receivedAccept = RegExp(
+                r'(^|\r\n)sec-websocket-accept:\s*([^\r\n]+)',
+                caseSensitive: false,
+              ).firstMatch(head)?[2]?.trim();
+
+              if (requestKey == null ||
+                  requestKey.isEmpty ||
+                  receivedAccept == null ||
+                  receivedAccept.isEmpty) {
+                if (!ready.isCompleted) {
+                  ready.completeError(
+                    'Invalid WebSocket handshake: missing request key or Sec-WebSocket-Accept',
+                  );
+                }
+                return;
+              }
+
+              // RFC 6455 requires a Base64-encoded 16-byte client nonce.
+              List<int> decodedRequestKey;
+              try {
+                decodedRequestKey = base64.decode(requestKey);
+              } on FormatException {
+                if (!ready.isCompleted) {
+                  ready.completeError(
+                    'Invalid WebSocket handshake: request key is not valid Base64',
+                  );
+                }
+                return;
+              }
+
+              if (decodedRequestKey.length != 16) {
+                if (!ready.isCompleted) {
+                  ready.completeError(
+                    'Invalid WebSocket handshake: request key must decode to 16 bytes',
+                  );
+                }
+                return;
+              }
+
+              const websocketGuid = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+              final expectedAccept = base64.encode(
+                sha1.convert(utf8.encode('$requestKey$websocketGuid')).bytes,
+              );
+
+              if (receivedAccept != expectedAccept) {
+                if (!ready.isCompleted) {
+                  ready.completeError(
+                    'Invalid WebSocket handshake: Sec-WebSocket-Accept mismatch',
+                  );
+                }
+                return;
+              }
+            }
+
+            log(
+              'info',
+              websocketFramed
+                  ? 'SSH: WebSocket handshake verified; enabling frame transport'
+                  : 'SSH: HTTP Upgrade accepted; using raw upgraded stream',
+            );
+            return startStream(websocketFramed);
+          }
+
           if (code >= 200 && code < 300) {
-            final cl = RegExp(r'content-length:\s*(\d+)', caseSensitive: false).firstMatch(head);
-            if (cl != null && method != 'CONNECT') skip = int.parse(cl[1]!);
-            if (skip == 0 && blocks >= expected) return startStream(false);
+            final contentLength = RegExp(
+              r'content-length:\s*(\d+)',
+              caseSensitive: false,
+            ).firstMatch(head);
+
+            if (contentLength != null && method != 'CONNECT') {
+              skip = int.parse(contentLength[1]!);
+            }
+
+            if (skip == 0 && blocks >= expected) {
+              return startStream(false);
+            }
             continue;
           }
-          if (!ready.isCompleted) ready.completeError('The proxy answered: $first');
+
+          // A 3xx response is only tried as a raw carrier on this same socket.
+          // Do not follow Location or forward credentials to another host.
+          // The subsequent real SSH authentication remains the success test.
+          if (code >= 300 && code < 400) {
+            payloadRedirectCandidate = true;
+            log(
+              'info',
+              'SSH: $first received; trying the same socket as a raw SSH payload carrier',
+            );
+            return startStream(false);
+          }
+
+          if (!ready.isCompleted) {
+            ready.completeError('The proxy answered: $first');
+          }
           return;
         }
       }
 
       sock.listen(
-        (d) {
+        (data) {
           if (passthrough) {
-            ws ? decoder!.add(d) : ctl.add(d);
+            if (ws) {
+              decoder!.add(data);
+            } else {
+              ctl.add(data);
+            }
             return;
           }
-          buf.addAll(d);
+          buf.addAll(data);
           process();
         },
-        onError: (Object e) {
-          if (!ready.isCompleted) ready.completeError(e);
-          if (!ctl.isClosed) ctl.addError(e);
+        onError: (Object error) {
+          if (!ready.isCompleted) ready.completeError(error);
+          if (!ctl.isClosed) ctl.addError(error);
         },
         onDone: () {
-          if (!ready.isCompleted) ready.completeError('The proxy closed the connection before the tunnel was open');
+          if (!ready.isCompleted) {
+            ready.completeError(
+              'The proxy closed the connection before the tunnel was open',
+            );
+          }
           if (!ctl.isClosed) ctl.close();
         },
         cancelOnError: false,
@@ -266,11 +431,23 @@ class SshTunnel {
       for (var i = 0; i < pp.parts.length; i++) {
         sock.add(utf8.encode(pp.parts[i].text));
         await sock.flush();
-        if (pp.parts[i].delayMs > 0 && i < pp.parts.length - 1) await Future<void>.delayed(Duration(milliseconds: pp.parts[i].delayMs));
+        if (pp.parts[i].delayMs > 0 && i < pp.parts.length - 1) {
+          await Future<void>.delayed(
+            Duration(milliseconds: pp.parts[i].delayMs),
+          );
+        }
       }
 
       final framed = await ready.future.timeout(timeout);
-      log('info', framed ? 'SSH: WebSocket tunnel established' : 'SSH: HTTP proxy tunnel established');
+
+      if (framed) {
+        log('info', 'SSH: WebSocket transport ready; validating SSH authentication');
+      } else if (payloadRedirectCandidate) {
+        log('info', 'SSH: 3xx raw payload candidate ready; validating SSH authentication');
+      } else {
+        log('info', 'SSH: HTTP proxy tunnel established; validating SSH authentication');
+      }
+
       return _NetSocket(sock, ctl.stream, framed ? WsSink(sock) : null);
     } catch (_) {
       // Timeout, bad reply or TLS failure: do not leave the connection open.

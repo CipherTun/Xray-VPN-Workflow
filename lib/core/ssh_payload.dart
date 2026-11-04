@@ -15,6 +15,7 @@ class ParsedPayload {
   const ParsedPayload({
     required this.parts,
     required this.methods,
+    this.webSocketKeys = const [],
     this.forceTls = false,
     this.forcePlain = false,
     this.sni,
@@ -24,6 +25,11 @@ class ParsedPayload {
 
   /// HTTP method of each request in the payload, in order. One response is expected per entry.
   final List<String> methods;
+
+  /// WebSocket request keys aligned with [methods].
+  /// Null means that the corresponding request is not a WebSocket request.
+  final List<String?> webSocketKeys;
+
   final bool forceTls, forcePlain;
   final String? sni;
   final String? hostHeader;
@@ -101,13 +107,22 @@ class PayloadParser {
 
     final fixed = <PayloadPart>[];
     final methods = <String>[];
+    final webSocketKeys = <String?>[];
     String? hostHeader;
     for (final p in parts) {
       if (p.text.isEmpty) continue;
       final text = _addWebSocketHeaders(p.text);
       fixed.add(PayloadPart(text, p.delayMs));
       final req = RegExp(r'^\s*([A-Za-z]+)\s+\S+\s+HTTP/\d', caseSensitive: false).firstMatch(text);
-      if (req != null) methods.add(req[1]!.toUpperCase());
+      if (req != null) {
+        methods.add(req[1]!.toUpperCase());
+        final key = RegExp(
+          r'^sec-websocket-key:\s*([^\r\n]+)',
+          multiLine: true,
+          caseSensitive: false,
+        ).firstMatch(text)?[1]?.trim();
+        webSocketKeys.add(key);
+      }
       hostHeader ??= RegExp(r'^host:\s*([^\r\n]+)', multiLine: true, caseSensitive: false).firstMatch(text)?[1]?.trim();
     }
     if (hostHeader != null && hostHeader.contains(':') && !hostHeader.contains(']')) {
@@ -116,6 +131,7 @@ class PayloadParser {
     return ParsedPayload(
       parts: fixed.isEmpty ? [PayloadPart(defaultPayload, 0)] : fixed,
       methods: methods,
+      webSocketKeys: webSocketKeys,
       forceTls: forceTls,
       forcePlain: forcePlain,
       sni: sni,
