@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# Android: fetches libv2ray.aar (AndroidLibXrayLite). iOS: builds XTLS/libXray (the only Xray wrapper
-# with an iOS target) against a pinned Xray-core. Installs the artifacts into the Flutter project. Needs: git, go (see libXray go.mod), python3, Android NDK
-# (for Android), Xcode (for iOS), gomobile.
+# Android: builds libv2ray.aar (AndroidLibXrayLite + patched Xray-core). iOS: builds XTLS/libXray (the only
+# Xray wrapper with an iOS target). Installs the artifacts into the Flutter project.
+# Needs: git, go (see the go.mod of each library), python3, Android NDK (Android), Xcode (iOS), gomobile.
+# All versions are pinned in scripts/versions.env.
 #
 #   ./scripts/build_cores.sh android
 #   ./scripts/build_cores.sh ios
 #   ./scripts/build_cores.sh geo
 set -euo pipefail
 
-XRAY_CORE_TAG="v26.10.21"
-LIBXRAY_TAG="v26.9.9"             # latest libXray tag found; bumped to the core commit below
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+set -a
+# shellcheck source=versions.env
+. "$ROOT/scripts/versions.env"
+set +a
 WORK="${WORK:-$ROOT/.cores}"
 
+# libXray tags follow the Xray-core version they embed, so checking out LIBXRAY_TAG is enough.
 build_libxray() {
   mkdir -p "$WORK" && cd "$WORK"
   [ -d libXray ] || git clone https://github.com/XTLS/libXray.git
   cd libXray
-  git fetch --tags && git checkout "$LIBXRAY_TAG"
-  rm -rf "$WORK/xray-src" && git clone --depth 1 --branch "$XRAY_CORE_TAG" https://github.com/XTLS/Xray-core.git "$WORK/xray-src"
-  go get "github.com/xtls/xray-core@$(git -C "$WORK/xray-src" rev-parse HEAD)"
-  go mod tidy
+  git fetch --tags --force && git checkout --detach "$LIBXRAY_TAG"
+  echo "libXray $(git describe --tags --exact-match) at $(git rev-parse HEAD)"
 }
 
 case "${1:-}" in

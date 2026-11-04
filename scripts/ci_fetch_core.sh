@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Build AndroidLibXrayLite against pinned Xray-core with CipherTun legacy plaintext compatibility.
+# Every version pin lives in scripts/versions.env.
 set -euo pipefail
-REPO="${CORE_REPO:-2dust/AndroidLibXrayLite}"
-REF="${CORE_REF:-}"
-XRAY_REPO="${XRAY_CORE_REPO:-XTLS/Xray-core}"
-XRAY_COMMIT="${XRAY_CORE_COMMIT:-a4a3dff5b20c}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+set -a
+# shellcheck source=versions.env
+. "$ROOT/scripts/versions.env"
+set +a
+REPO="$CORE_REPO"
+REF="${CORE_REF:-}"
+XRAY_REPO="$XRAY_CORE_REPO"
+XRAY_COMMIT="$XRAY_CORE_COMMIT"
 OUT="$ROOT/android-libs"
 WORK="$ROOT/.cores"
 mkdir -p "$OUT" "$WORK"
@@ -32,7 +37,7 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
 go version
 echo "Android NDK: ${ANDROID_NDK_HOME:-not set}"
-echo "Patched Xray commit: $(git -C xray-core rev-parse HEAD)"
+echo "Patched Xray commit: $(git -C xray-core rev-parse HEAD) (expected $XRAY_CORE_TAG)"
 go install golang.org/x/mobile/cmd/gomobile@latest
 go install golang.org/x/mobile/cmd/gobind@latest
 gomobile init
