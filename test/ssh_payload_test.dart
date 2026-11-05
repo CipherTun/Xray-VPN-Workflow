@@ -5,6 +5,27 @@ import 'package:flutter_test/flutter_test.dart';
 import '../lib/core/ssh_payload.dart';
 
 void main() {
+  group('SSH bootstrap response override', () {
+    test('accepts an explicitly configured 302-to-200 mapping', () {
+      expect(HttpResponseRewrite.targetStatus('302=200', 302), 200);
+    });
+
+    test('does not match a different received status', () {
+      expect(HttpResponseRewrite.targetStatus('302=200', 301), isNull);
+    });
+
+    test('does not allow a 101 protocol-upgrade rewrite', () {
+      expect(HttpResponseRewrite.targetStatus('302=101', 302), isNull);
+    });
+
+    test('rejects malformed and unsupported rules', () {
+      expect(HttpResponseRewrite.targetStatus('302', 302), isNull);
+      expect(HttpResponseRewrite.targetStatus('200=200', 200), isNull);
+      expect(HttpResponseRewrite.targetStatus('600=200', 600), isNull);
+    });
+  });
+
+
   group('PayloadParser HTTP request metadata', () {
     test('detects multiple HTTP requests in one payload', () {
       final parsed = PayloadParser.parse(

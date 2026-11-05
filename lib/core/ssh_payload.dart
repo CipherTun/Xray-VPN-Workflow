@@ -39,6 +39,18 @@ class ParsedPayload {
   final String? hostHeader;
 }
 
+/// Parses an explicit SSH bootstrap response status override.
+/// Only a configured 3xx-5xx status may be mapped to 200.
+class HttpResponseRewrite {
+  static int? targetStatus(String rule, int currentStatus) {
+    final match =
+        RegExp(r'^([3-5]\d{2})\s*=\s*200$').firstMatch(rule.trim());
+    if (match == null) return null;
+    if (int.parse(match[1]!) != currentStatus) return null;
+    return 200;
+  }
+}
+
 /// Understands the payload syntax people know from HTTP Injector / HTTP Custom:
 ///
 ///   [host] [port] [host_port] [protocol] [method] [netData]

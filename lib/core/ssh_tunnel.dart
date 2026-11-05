@@ -370,6 +370,58 @@ class SshTunnel {
                   : null;
           blocks++;
 
+          final overrideStatus =
+              HttpResponseRewrite.targetStatus(c.p('responseRewrite'), code);
+
+          if (overrideStatus != null &&
+              responseIndex == pp.methods.length - 1) {
+            final contentLengths = RegExp(
+              r'(^|\r\n)content-length:\s*([^\r\n]+)',
+              caseSensitive: false,
+            ).allMatches(head).toList();
+
+            final hasExactlyZeroLength =
+                contentLengths.length == 1 &&
+                contentLengths.single[2]!.trim() == '0';
+
+            final hasTransferEncoding = RegExp(
+              r'(^|\r\n)transfer-encoding:',
+              caseSensitive: false,
+            ).hasMatch(head);
+
+            final connectionClose = RegExp(
+              r'(^|\r\n)connection:.*\bclose\b',
+              caseSensitive: false,
+            ).hasMatch(head);
+
+            final httpVersion =
+                RegExp(r'^HTTP/(1\.[01])\s').firstMatch(first)?[1];
+
+            final persistentConnection =
+                httpVersion == '1.1' ||
+                (httpVersion == '1.0' &&
+                    RegExp(
+                      r'(^|\r\n)connection:.*\bkeep-alive\b',
+                      caseSensitive: false,
+                    ).hasMatch(head));
+
+            if (hasExactlyZeroLength &&
+                !hasTransferEncoding &&
+                !connectionClose &&
+                persistentConnection) {
+              log(
+                'warn',
+                'SSH: configured bootstrap response override accepted for $first; validating SSH transport',
+              );
+              return startStream(false);
+            }
+
+            log(
+              'warn',
+              'SSH: bootstrap response override rejected: response is not a verified bodyless persistent connection',
+            );
+          }
+
           if (code == 101) {
             final upgradeMatch = RegExp(
               r'(^|\r\n)upgrade:\s*([^\r\n]+)',
