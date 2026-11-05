@@ -16,6 +16,7 @@ class ParsedPayload {
     required this.parts,
     required this.methods,
     this.webSocketKeys = const [],
+    this.upgradeProtocols = const [],
     this.forceTls = false,
     this.forcePlain = false,
     this.sni,
@@ -29,6 +30,9 @@ class ParsedPayload {
   /// WebSocket request keys aligned with [methods].
   /// Null means that the corresponding request is not a WebSocket request.
   final List<String?> webSocketKeys;
+
+  /// Upgrade protocols requested by each HTTP request, aligned with [methods].
+  final List<String?> upgradeProtocols;
 
   final bool forceTls, forcePlain;
   final String? sni;
@@ -108,22 +112,47 @@ class PayloadParser {
     final fixed = <PayloadPart>[];
     final methods = <String>[];
     final webSocketKeys = <String?>[];
+    final upgradeProtocols = <String?>[];
     String? hostHeader;
     for (final p in parts) {
       if (p.text.isEmpty) continue;
       final text = _addWebSocketHeaders(p.text);
       fixed.add(PayloadPart(text, p.delayMs));
-      final req = RegExp(r'^\s*([A-Za-z]+)\s+\S+\s+HTTP/\d', caseSensitive: false).firstMatch(text);
-      if (req != null) {
+      final requests = RegExp(
+        r'^\s*([A-Za-z]+)\s+\S+\s+HTTP/\d(?:\.\d)?',
+        multiLine: true,
+        caseSensitive: false,
+      ).allMatches(text).toList();
+
+      for (var i = 0; i < requests.length; i++) {
+        final req = requests[i];
+        final requestEnd =
+            i + 1 < requests.length ? requests[i + 1].start : text.length;
+        final requestText = text.substring(req.start, requestEnd);
+
         methods.add(req[1]!.toUpperCase());
+
         final key = RegExp(
           r'^sec-websocket-key:\s*([^\r\n]+)',
           multiLine: true,
           caseSensitive: false,
-        ).firstMatch(text)?[1]?.trim();
+        ).firstMatch(requestText)?[1]?.trim();
+
+        final upgrade = RegExp(
+          r'^upgrade:\s*([^\r\n]+)',
+          multiLine: true,
+          caseSensitive: false,
+        ).firstMatch(requestText)?[1]?.trim();
+
         webSocketKeys.add(key);
+        upgradeProtocols.add(upgrade);
       }
-      hostHeader ??= RegExp(r'^host:\s*([^\r\n]+)', multiLine: true, caseSensitive: false).firstMatch(text)?[1]?.trim();
+
+      hostHeader ??= RegExp(
+        r'^host:\s*([^\r\n]+)',
+        multiLine: true,
+        caseSensitive: false,
+      ).firstMatch(text)?[1]?.trim();
     }
     if (hostHeader != null && hostHeader.contains(':') && !hostHeader.contains(']')) {
       hostHeader = hostHeader.split(':').first;
@@ -132,6 +161,7 @@ class PayloadParser {
       parts: fixed.isEmpty ? [PayloadPart(defaultPayload, 0)] : fixed,
       methods: methods,
       webSocketKeys: webSocketKeys,
+      upgradeProtocols: upgradeProtocols,
       forceTls: forceTls,
       forcePlain: forcePlain,
       sni: sni,

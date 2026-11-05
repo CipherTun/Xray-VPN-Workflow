@@ -442,7 +442,7 @@ class _EditorState extends State<_Editor> {
             _f('payload', 'Payload', lines: 3),
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
-              child: Text('Works like HTTP Injector / HTTP Custom. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a;b] [ua] [sni=name] [tls] [plain]. Empty payload = CONNECT [host_port] HTTP/1.1[crlf]Host: [host][crlf][crlf]. For WebSocket add Upgrade: websocket headers: real WebSocket replies are framed automatically, a bare 101 is used as a raw tunnel. Proxy ports 443, 8443, 2053, 2083, 2087 and 2096 use TLS automatically.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
+              child: Text('Supports HTTP Injector / HTTP Custom-style request payloads. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a;b] [ua] [sni=name] [tls] [plain]. Empty payload uses HTTP CONNECT. A successful CONNECT response establishes the tunnel. HTTP 101 Switching Protocols is accepted only when its Upgrade protocol matches the payload; WebSocket handshakes are verified and WebSocket frames are handled. HTTP redirects are reported and rejected rather than treated as tunnels. Proxy ports 443, 8443, 2053, 2083, 2087 and 2096 use TLS automatically.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
             ),
           ],
           Text('The first connection trusts the server host key and remembers it. A changed key is refused.', style: TextStyle(color: p.dim, fontSize: 12.5)),

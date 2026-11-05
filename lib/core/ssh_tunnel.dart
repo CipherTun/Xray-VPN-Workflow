@@ -190,9 +190,11 @@ class SshTunnel {
       final expected = pp.methods.isEmpty ? 1 : pp.methods.length;
       var blocks = 0;
       var skip = 0;
+      var chunkedBody = false;
+      int? chunkRemaining;
+      var chunkTrailers = false;
       var passthrough = false;
       var ws = false;
-      var payloadRedirectCandidate = false;
       WsDecoder? decoder;
 
       int endOfHeaders() {
@@ -227,12 +229,93 @@ class SshTunnel {
 
       void process() {
         while (!passthrough) {
+          // Drain a chunked HTTP response body before reading the next response.
+          if (chunkedBody) {
+            if (chunkTrailers) {
+              var lineEnd = -1;
+              for (var i = 0; i + 1 < buf.length; i++) {
+                if (buf[i] == 13 && buf[i + 1] == 10) {
+                  lineEnd = i;
+                  break;
+                }
+              }
+              if (lineEnd < 0) return;
+
+              final trailer = latin1.decode(buf.sublist(0, lineEnd));
+              buf.removeRange(0, lineEnd + 2);
+
+              if (trailer.isEmpty) {
+                chunkedBody = false;
+                chunkTrailers = false;
+                if (blocks >= expected) {
+                  ready.completeError(StateError(
+                    'HTTP payload completed without establishing a CONNECT or Upgrade tunnel',
+                  ));
+                  return;
+                }
+              }
+              continue;
+            }
+
+            if (chunkRemaining == null) {
+              var lineEnd = -1;
+              for (var i = 0; i + 1 < buf.length; i++) {
+                if (buf[i] == 13 && buf[i + 1] == 10) {
+                  lineEnd = i;
+                  break;
+                }
+              }
+              if (lineEnd < 0) return;
+
+              final line = latin1.decode(buf.sublist(0, lineEnd));
+              buf.removeRange(0, lineEnd + 2);
+
+              final size = int.tryParse(
+                line.split(';').first.trim(),
+                radix: 16,
+              );
+
+              if (size == null || size < 0 || size > 16777216) {
+                ready.completeError(StateError(
+                  'Invalid or oversized HTTP chunk in proxy response',
+                ));
+                return;
+              }
+
+              if (size == 0) {
+                chunkTrailers = true;
+                continue;
+              }
+              chunkRemaining = size;
+            }
+
+            final n = chunkRemaining!;
+            if (buf.length < n + 2) return;
+
+            if (buf[n] != 13 || buf[n + 1] != 10) {
+              ready.completeError(StateError(
+                'Malformed chunked HTTP response body',
+              ));
+              return;
+            }
+
+            buf.removeRange(0, n + 2);
+            chunkRemaining = null;
+            continue;
+          }
+
           if (skip > 0) {
             final n = skip < buf.length ? skip : buf.length;
             buf.removeRange(0, n);
             skip -= n;
             if (skip > 0) return;
-            if (blocks >= expected) return startStream(false);
+
+            if (blocks >= expected) {
+              ready.completeError(StateError(
+                'HTTP payload completed without establishing a CONNECT or Upgrade tunnel',
+              ));
+              return;
+            }
             continue;
           }
 
@@ -246,23 +329,32 @@ class SshTunnel {
           }
 
           final headerEnd = endOfHeaders();
-          if (headerEnd < 0) return;
+          if (headerEnd < 0) {
+            if (buf.length > 65536) {
+              ready.completeError(StateError(
+                'HTTP proxy response headers exceeded the 64 KiB limit',
+              ));
+            }
+            return;
+          }
 
           final head = latin1.decode(buf.sublist(0, headerEnd));
           buf.removeRange(0, headerEnd + 4);
 
           final first = head.split('\r\n').first;
-          final code =
-              int.tryParse(first.split(' ').skip(1).firstOrNull ?? '') ?? 0;
+          final statusMatch = RegExp(
+            r'^HTTP/\d(?:\.\d)?\s+(\d{3})(?:\s+.*)?$',
+          ).firstMatch(first);
 
-          if (!first.startsWith('HTTP/')) {
+          if (statusMatch == null) {
             if (!ready.isCompleted) {
               ready.completeError('Unexpected reply from the proxy');
             }
             return;
           }
 
-          if (!c.locked) log('info', 'SSH: proxy replied $first');
+          final code = int.parse(statusMatch[1]!);
+          log('info', 'SSH: HTTP response received: $first');
 
           // Interim responses do not complete a payload request.
           if (code >= 100 && code < 200 && code != 101) continue;
@@ -272,6 +364,10 @@ class SshTunnel {
           final method = responseIndex < pp.methods.length
               ? pp.methods[responseIndex]
               : '';
+          final requestedUpgrade =
+              responseIndex < pp.upgradeProtocols.length
+                  ? pp.upgradeProtocols[responseIndex]
+                  : null;
           blocks++;
 
           if (code == 101) {
@@ -287,14 +383,31 @@ class SshTunnel {
 
             if (upgradeMatch == null || !connectionUpgrade) {
               if (!ready.isCompleted) {
-                ready.completeError(
-                  'Invalid 101 response: missing Upgrade or Connection: Upgrade header',
-                );
+                ready.completeError(StateError(
+                  'HTTP 101 Switching Protocols response is missing the required Upgrade headers',
+                ));
               }
               return;
             }
 
-            final upgradeProtocol = upgradeMatch[2]!.trim().toLowerCase();
+            final upgradeProtocol =
+                upgradeMatch[2]!.split(',').first.trim().toLowerCase();
+
+            final requestedProtocols = (requestedUpgrade ?? '')
+                .split(',')
+                .map((v) => v.trim().toLowerCase())
+                .where((v) => v.isNotEmpty)
+                .toSet();
+
+            if (!requestedProtocols.contains(upgradeProtocol)) {
+              if (!ready.isCompleted) {
+                ready.completeError(StateError(
+                  'HTTP 101 Switching Protocols selected an Upgrade protocol that was not requested by the payload',
+                ));
+              }
+              return;
+            }
+
             final websocketFramed = upgradeProtocol == 'websocket';
 
             if (websocketFramed) {
@@ -359,43 +472,94 @@ class SshTunnel {
             log(
               'info',
               websocketFramed
-                  ? 'SSH: WebSocket handshake verified; enabling frame transport'
-                  : 'SSH: HTTP Upgrade accepted; using raw upgraded stream',
+                  ? 'SSH: WebSocket handshake verified; enabling WebSocket frame transport'
+                  : 'SSH: HTTP Upgrade accepted for $upgradeProtocol',
             );
             return startStream(websocketFramed);
           }
 
           if (code >= 200 && code < 300) {
+            // Only a successful CONNECT response establishes an HTTP tunnel.
+            if (method == 'CONNECT') {
+              log('info', 'SSH: HTTP CONNECT tunnel established');
+              return startStream(false);
+            }
+
+            final transferEncoding = RegExp(
+              r'transfer-encoding:\s*([^\r\n]+)',
+              caseSensitive: false,
+            ).firstMatch(head)?[1]?.toLowerCase();
+
+            if (transferEncoding != null) {
+              if (transferEncoding.split(',').any(
+                    (v) => v.trim() == 'chunked',
+                  )) {
+                chunkedBody = true;
+                continue;
+              }
+
+              ready.completeError(StateError(
+                'HTTP proxy used an unsupported response transfer encoding',
+              ));
+              return;
+            }
+
             final contentLength = RegExp(
               r'content-length:\s*(\d+)',
               caseSensitive: false,
             ).firstMatch(head);
 
-            if (contentLength != null && method != 'CONNECT') {
-              skip = int.parse(contentLength[1]!);
+            if (contentLength != null) {
+              final length = int.tryParse(contentLength[1]!);
+              if (length == null || length < 0) {
+                ready.completeError(StateError(
+                  'HTTP proxy returned an invalid Content-Length header',
+                ));
+                return;
+              }
+              skip = length;
+              if (skip > 0) continue;
+            } else if (method != 'HEAD' &&
+                code != 204 &&
+                code != 205 &&
+                code != 304) {
+              ready.completeError(StateError(
+                'HTTP $code response did not establish a tunnel and did not provide a delimited response body',
+              ));
+              return;
             }
 
-            if (skip == 0 && blocks >= expected) {
-              return startStream(false);
+            if (blocks >= expected) {
+              ready.completeError(StateError(
+                'HTTP payload completed without establishing a CONNECT or Upgrade tunnel',
+              ));
+              return;
             }
             continue;
           }
 
-          // A 3xx response is only tried as a raw carrier on this same socket.
-          // Do not follow Location or forward credentials to another host.
-          // The subsequent real SSH authentication remains the success test.
-          if (code >= 300 && code < 400) {
-            payloadRedirectCandidate = true;
+          // Redirect responses are not SSH tunnels. Never follow them or
+          // reinterpret their response bytes as an SSH transport.
+          if ({300, 301, 302, 303, 305, 307, 308}.contains(code)) {
+            final hasLocation = RegExp(
+              r'(^|\r\n)location:\s*[^\r\n]+',
+              caseSensitive: false,
+            ).hasMatch(head);
+
             log(
-              'info',
-              'SSH: $first received; trying the same socket as a raw SSH payload carrier',
+              'warn',
+              'SSH: HTTP redirect received: $first${hasLocation ? '; Location header present' : ''}; tunnel not established',
             );
-            return startStream(false);
+
+            ready.completeError(StateError(
+              'HTTP proxy returned $first; redirect responses are not accepted as SSH tunnels',
+            ));
+            return;
           }
 
-          if (!ready.isCompleted) {
-            ready.completeError('The proxy answered: $first');
-          }
+          ready.completeError(StateError(
+            'HTTP proxy rejected the payload: $first',
+          ));
           return;
         }
       }
@@ -442,10 +606,8 @@ class SshTunnel {
 
       if (framed) {
         log('info', 'SSH: WebSocket transport ready; validating SSH authentication');
-      } else if (payloadRedirectCandidate) {
-        log('info', 'SSH: 3xx raw payload candidate ready; validating SSH authentication');
       } else {
-        log('info', 'SSH: HTTP proxy tunnel established; validating SSH authentication');
+        log('info', 'SSH: HTTP tunnel ready; validating SSH authentication');
       }
 
       return _NetSocket(sock, ctl.stream, framed ? WsSink(sock) : null);
