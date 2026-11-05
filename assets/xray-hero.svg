@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="390" viewBox="0 0 1200 390" role="img" aria-labelledby="title desc">
+<title id="title">XRay VPN</title><desc id="desc">Animated neon network tunnel banner.</desc>
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset=".55" stop-color="#101638"/><stop offset="1" stop-color="#071d2b"/></linearGradient>
+ <linearGradient id="line"><stop stop-color="#16d9e8"/><stop offset=".5" stop-color="#7770ff"/><stop offset="1" stop-color="#16d9e8"/></linearGradient>
+ <filter id="glow"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+ <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#4e80a5" stroke-opacity=".13"/></pattern>
+</defs>
+<rect width="1200" height="390" rx="28" fill="url(#bg)"/><rect width="1200" height="390" rx="28" fill="url(#grid)"/>
+<g fill="none" stroke="url(#line)" stroke-width="2" opacity=".75" filter="url(#glow)">
+ <path d="M-30 290 C170 130 270 360 470 190 S800 30 1230 210"><animate attributeName="stroke-dashoffset" values="0;-180" dur="8s" repeatCount="indefinite"/><animate attributeName="stroke-dasharray" values="3 18;14 12;3 18" dur="5s" repeatCount="indefinite"/></path>
+ <path d="M-20 330 C210 170 330 390 540 220 S900 80 1220 270" stroke-opacity=".5"><animate attributeName="stroke-dashoffset" values="0;220" dur="11s" repeatCount="indefinite"/></path>
+ <circle cx="920" cy="100" r="46"><animate attributeName="r" values="42;55;42" dur="4s" repeatCount="indefinite"/></circle>
+ <circle cx="920" cy="100" r="70" stroke-opacity=".3"><animate attributeName="r" values="65;84;65" dur="4s" repeatCount="indefinite"/></circle>
+</g>
+<g fill="#5cecff" opacity=".8"><circle cx="155" cy="88" r="3"><animate attributeName="opacity" values=".2;1;.2" dur="2s" repeatCount="indefinite"/></circle><circle cx="1050" cy="300" r="3"><animate attributeName="opacity" values="1;.2;1" dur="2.8s" repeatCount="indefinite"/></circle><circle cx="760" cy="55" r="2"/></g>
+<text x="76" y="150" fill="#7cefff" font-family="Arial,sans-serif" font-size="17" letter-spacing="7">CIPHERTUN NETWORK PROJECT</text>
+<text x="70" y="235" fill="#f4fbff" font-family="Arial,sans-serif" font-size="76" font-weight="700" letter-spacing="2">XRAY VPN</text>
+<rect x="76" y="260" width="300" height="3" rx="2" fill="url(#line)"/>
+<text x="78" y="307" fill="#b8c9e4" font-family="Arial,sans-serif" font-size="21" letter-spacing="2">SECURE CONNECTIONS. ENGINEERED CONTROL.</text>
+<text x="78" y="350" fill="#6f8cae" font-family="Arial,sans-serif" font-size="13" letter-spacing="3">MULTI-PROTOCOL  •  SSH TUNNELING  •  FLUTTER</text>
+</svg>

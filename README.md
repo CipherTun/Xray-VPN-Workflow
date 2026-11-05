@@ -1,119 +1,221 @@
-# XRay VPN
+<div align="center">
 
-Flutter VPN client for **Android and iOS**, package / bundle id **`io.surprise.vpn`**.
+<img src="assets/xray-hero.svg" alt="XRay VPN — Secure connections, engineered with control" width="100%">
 
-| Piece | Version | Notes |
-|---|---|---|
-| Core library (Android) | **AndroidLibXrayLite** (`libv2ray.aar`, latest release) | The Xray-core library behind v2rayNG. Full Xray-core, so every Xray protocol and transport works: VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP, WireGuard, Hysteria, Reality, XTLS Vision, WebSocket, gRPC, XHTTP, HTTPUpgrade, mKCP. Downloaded prebuilt in CI, built from source if no release asset exists. |
-| Core library (iOS) | XTLS/libXray (`LibXray.xcframework`) | AndroidLibXrayLite is Android-only, so iOS keeps the official wrapper. Same Xray-core, same config JSON. |
-| DartSSH2 | **4.1.0** (`dartssh2: ^4.1.0`) | Dynamic forwarding (`ssh -D`) powers the SSH profile type |
-| Flutter | 3.38 or newer (Dart 3.10+) | share_plus 13 and file_picker 12 need it |
+<br>
 
-## How it works
+<p>
+  <a href="https://github.com/CipherTun/Xray-VPN-Workflow/actions"><img src="https://img.shields.io/github/actions/workflow/status/CipherTun/Xray-VPN-Workflow/build-android.yml?style=for-the-badge&logo=githubactions&logoColor=white&label=ANDROID%20CI&color=18C8D8" alt="Android CI"></a>
+  <a href="https://github.com/CipherTun/Xray-VPN-Workflow"><img src="https://img.shields.io/github/stars/CipherTun/Xray-VPN-Workflow?style=for-the-badge&logo=github&logoColor=white&label=STARS&color=7357FF" alt="GitHub stars"></a>
+  <a href="https://github.com/CipherTun/Xray-VPN-Workflow/issues"><img src="https://img.shields.io/github/issues/CipherTun/Xray-VPN-Workflow?style=for-the-badge&logo=github&logoColor=white&label=ISSUES&color=18A9C7" alt="Open issues"></a>
+  <a href="https://github.com/CipherTun/Xray-VPN-Workflow/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CipherTun/Xray-VPN-Workflow?style=for-the-badge&color=7357FF" alt="License"></a>
+</p>
 
-```
- Flutter UI ──MethodChannel──► Android: XRayVpnService (VpnService)     iOS: PacketTunnelProvider
-                                   │ establish() → TUN fd                    │ utun fd
-                                   ▼                                         ▼
-                         Xray-core `tun` inbound (xray.tun.fd) ── routing ── proxy outbound
-                                                                         │
-                  VLESS / VMess / Trojan / Shadowsocks (+Reality, TLS, WS, gRPC, XHTTP, HTTPUpgrade, Mux, fragment)
-                                                                         │
-                  SSH profile: DartSSH2 opens a session and a local SOCKS5 port; Xray's outbound points at it
-```
+**A configurable VPN client built around Xray connectivity and SSH tunneling.**
 
-* **TUN mode**: the platform creates the TUN device and Xray-core consumes it directly. No tun2socks helper.
-* The app is excluded from its own VPN on Android so Xray and SSH sockets never loop. The Tools tab reaches the tunnel through a local HTTP inbound (`socksPort + 1`).
+[Overview](#-overview) · [Capabilities](#-capabilities) · [Architecture](#-architecture) · [Build](#-build-from-source) · [Security](#-security--privacy)
 
-## Setup
+<img src="assets/neon-divider.svg" width="100%" alt="">
+
+</div>
+
+## ◈ Overview
+
+**XRay VPN** is a Flutter-based VPN client project focused on configurable network connections, protocol flexibility and a maintainable cross-platform codebase.
+
+The application brings connection profiles, Xray-powered proxying and SSH tunneling into one interface. Its design separates the Flutter experience from the platform VPN layer and the underlying tunnel engines, making the project easier to inspect, maintain and extend.
+
+> **Project status:** capabilities depend on the platform, bundled core, build configuration and server-side support. Consult the current source and workflow results before treating any feature as production-ready.
+
+## ✦ Capabilities
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### ◈ Connection profiles
+- Create and manage connection configurations
+- Import supported configuration formats
+- Share configurations using the app's protected export flow
+- Configure connection-specific options
+
+</td>
+<td width="50%" valign="top">
+
+### ⌁ Tunnel engines
+- Xray-based proxy connectivity
+- SSH tunnel support through DartSSH2
+- TUN-based traffic routing on supported platforms
+- Platform-specific engine integration
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### ⌘ Network configuration
+- Custom transport and routing parameters
+- DNS and connection settings
+- Per-profile configuration
+- Connection state and diagnostic information
+
+</td>
+<td width="50%" valign="top">
+
+### ◉ User experience
+- Flutter interface
+- Theme and appearance options
+- Permission-aware connection flow
+- Local configuration management
+
+</td>
+</tr>
+</table>
+
+### Protocols and transports
+
+The Xray core supports multiple proxy protocols and transport options. Actual availability is determined by the bundled core version, application integration and remote server configuration.
+
+| Area | Configuration examples |
+|---|---|
+| Proxy protocols | VLESS, VMess, Trojan, Shadowsocks |
+| Transports | TCP, WebSocket, gRPC, HTTP-based transports |
+| Security layers | TLS and supported Reality configurations |
+| Tunnel mode | Android VPN/TUN integration where configured |
+| SSH | SSH-based forwarding and supported payload/transport options |
+
+*This is a capability overview, not a guarantee that every protocol/transport combination is available on every platform or build.*
+
+<img src="assets/neon-divider.svg" width="100%" alt="">
+
+## ⛓ Architecture
+
+<img src="assets/architecture.svg" width="100%" alt="Application architecture diagram">
+
+| Layer | Responsibility |
+|---|---|
+| Flutter application | Screens, profile management, settings and user interaction |
+| Connection/controller layer | Coordinates connection lifecycle and configuration |
+| Tunnel integrations | Xray and SSH connectivity |
+| Platform VPN layer | OS-level VPN permission and traffic routing |
+| Core/runtime | Platform-specific native tunnel components |
+
+The exact integration differs between Android and iOS. Refer to the platform source and build scripts for the implementation currently present in this branch.
+
+## 🧰 Technology
+
+<div align="center">
+
+<img src="https://img.shields.io/badge/Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white" alt="Flutter">
+<img src="https://img.shields.io/badge/Dart-0175C2?style=for-the-badge&logo=dart&logoColor=white" alt="Dart">
+<img src="https://img.shields.io/badge/Xray-Core-18A9C7?style=for-the-badge&logo=protonvpn&logoColor=white" alt="Xray">
+<img src="https://img.shields.io/badge/Android-VPN-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android VPN">
+<img src="https://img.shields.io/badge/SSH-DartSSH2-7357FF?style=for-the-badge&logo=gnubash&logoColor=white" alt="SSH">
+<img src="https://img.shields.io/badge/iOS-Platform%20Integration-111111?style=for-the-badge&logo=apple&logoColor=white" alt="iOS">
+
+</div>
+
+## 🚀 Build from source
+
+### Requirements
+
+- Flutter SDK compatible with the version declared by the project
+- Dart SDK supplied by the selected Flutter installation
+- Android SDK and Android build tools required by the Gradle configuration
+- Java version required by the Gradle/Android Gradle Plugin configuration
+- Git
+
+For iOS builds, use macOS with the required Xcode toolchain and follow the repository's iOS-specific setup instructions.
+
+### Clone
 
 ```bash
-./scripts/setup.sh                 # flutter create + overlay + gradle patch
-./scripts/build_cores.sh android   # libv2ray.aar → android/app/libs
-./scripts/build_cores.sh geo       # geoip.dat / geosite.dat (needed for the ad-block rule)
-flutter run
+git clone https://github.com/CipherTun/Xray-VPN-Workflow.git
+cd Xray-VPN-Workflow
 ```
 
-### iOS (manual Xcode steps, Apple does not allow scripting these)
-1. Open `ios/Runner.xcworkspace`. **File → New → Target → Network Extension → Packet Tunnel Provider**, name it `PacketTunnel`, bundle id `io.surprise.vpn.PacketTunnel`.
-2. Replace the generated files with `ios/PacketTunnel/*` (provider, Info.plist, entitlements).
-3. Add the **Network Extensions (Packet Tunnel)** and **App Groups** capabilities to *both* targets, group `group.io.surprise.vpn`. Set `Runner.entitlements` as Runner's entitlements file.
-4. `./scripts/build_cores.sh ios`, add `LibXray.xcframework` to both targets.
-5. Needs a paid Apple Developer account and a real device (the simulator cannot run packet tunnels).
+### Install Flutter dependencies
 
-## Build from your phone with GitHub Actions (no PC needed)
+```bash
+flutter pub get
+```
 
-1. On github.com create a **private** repository (private keeps your signing key and shared configs safe).
-2. **Add file → Create new file**, name it `.github/workflows/build-android.yml` and paste the contents of `build-android.yml` (shipped next to this zip). Commit.
-3. **Add file → Upload files**, upload `xray_vpn.zip` to the repository root, commit to `main`. The workflow unpacks the zip itself, so you never need to extract anything.
-4. Open the **Actions** tab → *Build Android APK*. The first run takes ~15-25 minutes (it downloads the Xray core library, or compiles it if no prebuilt file exists; later runs reuse the cache). You can also tap *Run workflow* and pick `debug` for a faster test build.
-5. When it is green, open the run and download the **XRayVPN-apks** artifact. Unzip it with your phone's file manager and install `XRayVPN-arm64-v8a.apk` (most phones) or the universal APK.
-6. To update: upload a new `xray_vpn.zip` (same name, replace) and the build runs again. Push a tag like `v1.0.1` to get the APKs attached to a GitHub Release.
+### Run static analysis
 
-**Signing.** Without secrets the workflow creates a signing key once and caches it, so updates install over each other. GitHub deletes caches that go unused for 7 days; if that happens, uninstall the old app before installing the new build. For a permanent key add repository secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
+```bash
+flutter analyze
+```
 
-**Icons.** `scripts/make_icons.py` drew the launcher icon (tick dial + bolt, adaptive and Android 13 themed layers); the workflow turns them into every size with `flutter_launcher_icons`. The status-bar icon is a vector shield with a bolt cut-out.
+### Build Android
 
-iOS is not built by the workflow: the Packet Tunnel extension target has to be added in Xcode and an unsigned build cannot be installed without a Mac or sideloading tool.
+```bash
+flutter build apk --debug
+```
 
-## Sharing configs
+The repository's GitHub Actions workflows may perform additional native-core preparation or platform-specific build steps. For a reproducible result, use the workflow defined in the branch you are building rather than assuming a generic local Flutter command includes every preparation step.
 
-Open a server → **Share…**. Configs travel as an encrypted package (AES-256-GCM): a `xrayvpn://import?d=…` link, a QR code or a `.xrcfg` file.
+### Automated builds
 
-**Locking is automatic.** Switch on *Lock config* and the receiver gets a config whose server address and credentials are hidden in the UI and logs, with editing, copying and exporting disabled. No PIN, phone passcode or password is involved, same as other provider apps. (The app PIN in Settings → Security is a separate privacy feature for opening XRay itself.)
+Open the repository's **Actions** tab to inspect available workflows, build logs and generated artifacts:
 
-Presets: *Open*, *Locked*, *Trial* (1 day, 500 MB, 1 h sessions, no root) and *Monthly* (30 days, 20 GB). Every option can be changed:
+[**View GitHub Actions →**](https://github.com/CipherTun/Xray-VPN-Workflow/actions)
 
-* **Message** and sender name shown to the receiver on import and on the Dashboard
-* **Validity**: fixed date, or N days counted from the receiver's first import
-* **Protection**: block re-sharing, hide from screenshots, block rooted phones, lock to one device ID (Settings → About)
-* **Limits**: maximum session length and total data, enforced by the receiving app
-* **Live preview** of exactly what the receiver will see
-* **Advanced**: an optional password that encrypts the file for one specific person
+<img src="assets/neon-divider.svg" width="100%" alt="">
 
-If someone re-shares a config they received (when allowed), expiry, data, session, root and lock limits can only be kept or tightened, never loosened.
+## 🔐 Security & privacy
 
-Honest limits: the app has to hand the real credentials to the VPN core to connect, so a lock stops casual viewing, copying and editing, not someone who controls a rooted phone. Expiry and data counters live on the receiver's phone, so they can be defeated by changing the clock or wiping app data.
+VPN software handles sensitive network traffic. Treat configuration files, credentials, private keys and exported profiles accordingly.
 
-## Settings map
+- Do not commit server credentials, private keys, signing keys or production secrets.
+- Keep signing material and API credentials in protected local files or repository secrets.
+- Review imported profiles before connecting.
+- Share configuration data only with people and services you trust.
+- Use current, trusted core releases and review upstream security advisories.
+- A VPN connection does not make a device anonymous or protect against every form of tracking, malware or account compromise.
 
-| Page | Highlights |
-|---|---|
-| Connection | Kill switch, auto-reconnect, smart connect, auto-disconnect timer, IPv6, MTU, per-app VPN |
-| Routing & rules | Rules editor (drag to reorder, rule tester, presets), direct for a country, block QUIC/BitTorrent, domain strategy, in-app geo file updates |
-| DNS | Providers, DoH, custom servers, FakeDNS, static hosts, query strategy, cache |
-| Xray / V2Ray core | Sniffing, Mux/XUDP, TLS fragmentation, uTLS fingerprint, TCP Fast Open/MPTCP, failover and load balancing (balancer + observatory), double-hop chain, share on LAN with optional login, JSON override, copy generated config |
-| SSH | Keep-alive, timeouts, no-delay, host key policy (trust on first use / manual approval / off) with a trusted-hosts manager, jump host, per-server transports: direct, TLS with custom SNI, HTTP proxy payload with WebSocket support and HTTP Injector style placeholders |
-| Android | Wake lock levels, battery exemption, boot start, real-network tracking, LAN exclusion, bypass control, notification privacy, Always-on VPN, Data Saver, diagnostics, launcher shortcuts and Quick Settings tile |
-| Security & privacy | App PIN with lock delay, block screenshots, clear logs, erase all data |
-| Data & backup | Daily and monthly caps, usage history, subscriptions, encrypted server backup, settings export and import |
+**Configuration protection is not a substitute for secure device storage, safe credential handling or a security review.**
 
-## Permissions (Android)
-`INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_SYSTEM_EXEMPTED` (Android 14), `POST_NOTIFICATIONS` (requested at connect time), `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, and the service-level `BIND_VPN_SERVICE`. The system VPN consent dialog is shown through `VpnService.prepare()` on first connect. Always-on VPN and "Block connections without VPN" are supported through the system settings (Settings → System VPN settings shortcut).
+## 🧭 Platform notes
 
-## Features
-Dashboard dial with live throughput, Configs (paste, subscriptions, manual editor, latency test, favorites, swipe to delete, share link), Logs (filter, copy), Tools (public IP, speed test, latency, DoH lookup, export), Settings (themes, 6 accents + custom colour picker, blur strength, routing modes, kill switch, auto-reconnect, connect on launch, IPv6, MTU, DNS, per-app VPN on Android, sniffing, Mux, TLS fragmentation, log level, SSH keep-alive and host-key reset), Quick Settings tile (Android), foreground notification with Disconnect, SSH trust-on-first-use host key pinning.
+- **Android:** uses the Android VPN permission and platform-specific tunnel integration. Supported ABIs and native libraries depend on the workflow and packaged artifacts.
+- **iOS:** requires the platform-specific Xray/Network Extension integration and the manual setup documented in the repository. Do not assume Android feature parity.
+- **SSH:** the SSH tunnel lifecycle depends on the Flutter/runtime lifecycle and the implementation in the current source.
 
-## More features
-Strong wake lock (CPU + Wi-Fi lock with watchdog renewal, three levels), battery-optimisation prompt, start on boot, network-change aware tunnel, Quick Settings tile, speed in the notification, smart "fastest server" connect, subscription auto-update, data usage history with monthly cap warning, auto-disconnect timer, DNS presets (incl. DoH), QUIC blocking, custom routing rules, PIN app lock, encrypted backup and restore.
+## 🛠 Troubleshooting
 
-## Known limits (read before shipping)
-* **Not compiled in the environment that produced this code.** I had no Flutter/Android/Xcode toolchain or network, so expect a first-build fix-up pass.
-* `XrayCore.kt` follows the AndroidLibXrayLite API (`Libv2ray.initCoreEnv`, `newCoreController`, `startLoop(config, tunFd)`). If a future release renames these, only that file changes. On iOS, `PacketTunnelProvider.swift` follows the libXray `Invoke` API.
-* The SSH profile runs in the Flutter engine. It survives backgrounding while the VPN foreground service keeps the process alive, but swiping the app away ends the engine and the SSH session; auto-reconnect then cannot restart it. For always-on SSH, move DartSSH2 into a headless Dart isolate or the service.
-* Android traffic counters use device-level `TrafficStats` (the app itself is excluded from the VPN), so numbers are approximate. iOS shows status only.
-* Per-app VPN is Android only. iOS extensions are limited to about 50 MB of RAM.
-* The Play Store restricts VPN apps (declaration form, no data harvesting) and `systemExempted` foreground services; App Store requires an organisation account for Network Extension VPNs.
+1. Confirm the profile is valid and matches the server configuration.
+2. Check that the required Android VPN permission has been granted.
+3. Inspect the application diagnostics and the relevant GitHub Actions logs.
+4. Verify that the selected protocol, transport and security options are supported by the bundled core.
+5. Rebuild after changing native dependencies or core preparation scripts.
 
-## Legacy plaintext VLESS/Trojan compatibility
+When reporting a problem, include the platform, app version or commit, selected connection type and relevant sanitized logs. **Remove addresses, UUIDs, passwords, tokens, private keys and other identifying values first.**
 
-The Android core is built from source rather than using the upstream prebuilt AAR.
-The build pins the Xray-core source commit used by the selected AndroidLibXrayLite
-module and applies `scripts/patch_xray_core.py`. This client-side patch permits
-legacy public-endpoint VLESS and Trojan outbounds with `security: none`; it does
-not add encryption or make an incompatible server work. The client and server
-must use matching protocol, credentials, transport, WebSocket path/Host, and
-other parameters. Prefer TLS, REALITY, or VLESS Encryption when available.
+## 🤝 Contributing
 
-The patch intentionally does not change Shadowsocks. VMess continues to use
-the security method selected by the profile and Xray's VMess implementation.
+Contributions that improve reliability, maintainability, documentation, accessibility and platform compatibility are welcome.
+
+1. Fork the repository.
+2. Create a focused feature or fix branch.
+3. Keep changes scoped and explain any native-core or workflow modifications.
+4. Run the checks relevant to the files you changed.
+5. Open a pull request with a clear summary and test evidence.
+
+Please avoid submitting credentials, personal configuration files or unreviewed binary artifacts.
+
+## ⚖️ Disclaimer
+
+This project is provided for lawful network connectivity, development and educational purposes. Users are responsible for complying with applicable laws, network policies and service terms. The project does not endorse unauthorized access, service abuse or bypassing restrictions in violation of applicable rules.
+
+## 📡 Project
+
+<div align="center">
+
+<a href="https://github.com/CipherTun/Xray-VPN-Workflow"><img src="https://img.shields.io/badge/Repository-CipherTun%20%2F%20Xray--VPN--Workflow-10172A?style=for-the-badge&logo=github&logoColor=white" alt="Repository"></a>
+<a href="https://github.com/CipherTun/Xray-VPN-Workflow/issues"><img src="https://img.shields.io/badge/Support-Open%20an%20Issue-18A9C7?style=for-the-badge&logo=github&logoColor=white" alt="Issues"></a>
+
+<img src="assets/xray-footer.svg" width="100%" alt="Engineered for control. Built for connectivity.">
+
+<sub>Designed and maintained by <a href="https://github.com/CipherTun">CipherTun</a></sub>
+
+</div>
