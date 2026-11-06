@@ -10,23 +10,21 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.TrafficStats
 import android.net.VpnService
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import org.json.JSONObject
-import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * TUN-mode VPN. The service creates the TUN interface with VpnService.Builder and hands
- * its file descriptor to Xray-core, whose native `tun` inbound reads and writes packets.
+ * TUN-mode VPN. The service creates the TUN interface with VpnService.Builder and hands a duplicate of its
+ * file descriptor to the v2tun library (CipherTun/V2-TUN), which runs the packet stack and every protocol
+ * (VLESS, VMess, Trojan, Shadowsocks, SSH) itself.
  *
- * Loop prevention: XRay's own package is always excluded from the VPN
- * (addDisallowedApplication), so Xray's outbound sockets and the SSH session
- * reach the network directly instead of re-entering the tunnel.
+ * Loop prevention: v2tun protects its own sockets through VpnService.protect (see [V2Tun]), so the app is
+ * not excluded from the VPN and its own traffic (Tools tab, subscriptions) goes through the tunnel.
  *
  * Staying alive (wake mode "strong"):
  *  - foreground service with an ongoing notification, START_STICKY, Always-on VPN support
@@ -72,7 +70,7 @@ class XRayVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        XrayCore.attach(applicationContext)
+        V2Tun.attach(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -105,25 +103,29 @@ class XRayVpnService : VpnService() {
     private fun startTunnel(cfgJson: String, o: JSONObject) {
         VpnEvents.status("connecting")
         try {
-            XrayCore.stop()
+            V2Tun.stop()
             closeTun()
             killSwitch = o.optBoolean("killSwitch")
+            val mtu = o.optInt("mtu", 1500)
 
             val b = Builder()
                 .setSession("XRay VPN")
-                .setMtu(o.optInt("mtu", 1500))
+                .setMtu(mtu)
                 .addAddress("172.19.0.1", 30)
                 .addRoute("0.0.0.0", 0)
             if (o.optBoolean("ipv6")) b.addAddress("fd00:1:fd00:1::1", 126)
-            b.addRoute("::", 0) // IPv6 either flows through Xray or is dropped; never leaks
+            b.addRoute("::", 0) // IPv6 either flows through the tunnel or is dropped; never leaks
 
             val dns = o.optJSONArray("dns")
+            var firstDns = ""
             var added = 0
             if (dns != null) for (i in 0 until dns.length()) {
                 val d = dns.optString(i)
-                if (d.isNotBlank()) { try { b.addDnsServer(d); added++ } catch (_: Exception) {} }
+                if (d.isNotBlank()) {
+                    try { b.addDnsServer(d); if (firstDns.isEmpty()) firstDns = d; added++ } catch (_: Exception) {}
+                }
             }
-            if (added == 0) b.addDnsServer("1.1.1.1")
+            if (added == 0) { b.addDnsServer("1.1.1.1"); firstDns = "1.1.1.1" }
             if (Build.VERSION.SDK_INT >= 29) b.setMetered(false)
             if (o.optBoolean("allowBypass")) b.allowBypass()
             if (Build.VERSION.SDK_INT >= 33 && o.optBoolean("excludeLan")) {
@@ -133,26 +135,36 @@ class XRayVpnService : VpnService() {
                 }
             }
 
-            // Per-app VPN
+            // Per-app VPN. The app itself is not excluded: v2tun protects its own sockets.
             val apps = mutableListOf<String>()
             o.optJSONArray("perApps")?.let { a -> for (i in 0 until a.length()) apps.add(a.optString(i)) }
-            val mode = o.optString("perAppMode", "off")
-            if (mode == "only" && apps.isNotEmpty()) {
-                apps.filter { it != packageName }.forEach { try { b.addAllowedApplication(it) } catch (_: Exception) {} }
-            } else {
-                b.addDisallowedApplication(packageName)
-                if (mode == "exclude") apps.forEach { try { b.addDisallowedApplication(it) } catch (_: Exception) {} }
+            when (o.optString("perAppMode", "off")) {
+                "only" -> if (apps.isNotEmpty()) apps.forEach { try { b.addAllowedApplication(it) } catch (_: Exception) {} }
+                "exclude" -> apps.forEach { try { b.addDisallowedApplication(it) } catch (_: Exception) {} }
             }
 
             val pfd = b.establish() ?: throw IllegalStateException("The system refused to create the VPN interface. Is another VPN active?")
             tun = pfd
 
-            copyGeoAssets()
-            // The config goes to the core as text, so it never touches the disk.
-            val err = XrayCore.start(cfgJson, pfd.fd, filesDir.absolutePath)
-            if (err != null) throw IllegalStateException(err)
+            // The library owns the descriptor it is given and closes it on stop, so it gets a duplicate; the
+            // original keeps the interface up (kill switch) and lets the watchdog check it.
+            val fd = ParcelFileDescriptor.dup(pfd.fileDescriptor).detachFd()
+            V2Tun.resetTraffic()
+            // The config goes to the library as text, so it never touches the disk.
+            val err = V2Tun.start(cfgJson, fd, mtu, "$firstDns:53", o.optBoolean("fakeDns"), o.optBoolean("sniff", true))
+            if (err != null) {
+                try { ParcelFileDescriptor.adoptFd(fd).close() } catch (_: Exception) {}
+                throw IllegalStateException(err)
+            }
 
-            XrayCore.version()?.let { VpnEvents.log("info", "Xray-core $it") }
+            // Named routing lists (country IPs, ad domains, ...) prepared by the app.
+            o.optJSONObject("routeLists")?.let { lists ->
+                for (k in lists.keys()) {
+                    V2Tun.setRouteList(k, lists.optString(k))?.let { VpnEvents.log("warn", "Route list $k: $it") }
+                }
+            }
+
+            VpnEvents.log("info", "v2tun tunnel started")
             running = true
             acquireLocks()
             watchNetworks()
@@ -170,7 +182,7 @@ class XRayVpnService : VpnService() {
         statsOn = false
         watchdogOn = false
         running = false
-        try { XrayCore.stop() } catch (_: Throwable) {}
+        V2Tun.stop()
         if (killSwitch && tun != null) {
             // Kill switch: keep the TUN interface up with nothing reading it, so traffic is dropped, not leaked.
             VpnEvents.status("error", "$msg Kill switch is blocking traffic until you disconnect.")
@@ -189,7 +201,7 @@ class XRayVpnService : VpnService() {
         statsOn = false
         watchdogOn = false
         running = false
-        try { XrayCore.stop() } catch (_: Throwable) {}
+        V2Tun.stop()
         releaseLocks()
         unwatchNetworks()
         closeTun()
@@ -210,7 +222,8 @@ class XRayVpnService : VpnService() {
     override fun onDestroy() {
         statsOn = false
         watchdogOn = false
-        try { XrayCore.stop() } catch (_: Throwable) {}
+        V2Tun.stop()
+        V2Tun.detach(this)
         releaseLocks()
         unwatchNetworks()
         closeTun()
@@ -311,15 +324,6 @@ class XRayVpnService : VpnService() {
 
     // ───────── helpers ─────────
 
-    /** geoip.dat / geosite.dat shipped in assets (see scripts/build_cores.sh) are copied next to the config. */
-    private fun copyGeoAssets() {
-        for (n in listOf("geoip.dat", "geosite.dat")) {
-            val dst = File(filesDir, n)
-            if (dst.exists()) continue
-            try { assets.open(n).use { i -> dst.outputStream().use { o -> i.copyTo(o) } } } catch (_: Exception) {}
-        }
-    }
-
     private fun rate(b: Long): String {
         val u = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
         var v = b.toDouble(); var i = 0
@@ -327,21 +331,18 @@ class XRayVpnService : VpnService() {
         return String.format("%.1f %s", v, u[i])
     }
 
-    /** Device-level counters: XRay itself is excluded from the VPN, so these approximate tunnel traffic. */
+    /** Tunnel counters from the library: only bytes that really went through the tunnel are counted. */
     private fun startStats() {
         statsOn = true
         Thread {
-            val rx0 = TrafficStats.getTotalRxBytes()
-            val tx0 = TrafficStats.getTotalTxBytes()
-            var lastRx = rx0
-            var lastTx = tx0
+            var lastRx = V2Tun.down()
+            var lastTx = V2Tun.up()
             var tick = 0
             while (statsOn) {
                 try { Thread.sleep(1000) } catch (_: InterruptedException) { break }
-                val rx = TrafficStats.getTotalRxBytes()
-                val tx = TrafficStats.getTotalTxBytes()
-                if (rx == TrafficStats.UNSUPPORTED.toLong()) break
-                VpnEvents.stats(rx - rx0, tx - tx0, rx - lastRx, tx - lastTx)
+                val rx = V2Tun.down()
+                val tx = V2Tun.up()
+                VpnEvents.stats(rx, tx, rx - lastRx, tx - lastTx)
                 if (++tick % 3 == 0) updateNotification("↓ ${rate((rx - lastRx))}  ↑ ${rate((tx - lastTx))} · $name")
                 lastRx = rx
                 lastTx = tx
