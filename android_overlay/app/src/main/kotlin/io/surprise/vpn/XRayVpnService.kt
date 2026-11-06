@@ -16,12 +16,13 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.Executors
 
 /**
  * TUN-mode VPN. The service creates the TUN interface with VpnService.Builder and hands a duplicate of its
  * file descriptor to the v2tun library (CipherTun/V2-TUN), which runs the packet stack and every protocol
- * (VLESS, VMess, Trojan, Shadowsocks, SSH) itself.
+ * (VLESS, VMess, Trojan, Shadowsocks, SSH, SOCKS, HTTP, Hysteria) itself.
  *
  * Loop prevention: v2tun protects its own sockets through VpnService.protect (see [V2Tun]), so the app is
  * not excluded from the VPN and its own traffic (Tools tab, subscriptions) goes through the tunnel.
@@ -157,10 +158,12 @@ class XRayVpnService : VpnService() {
                 throw IllegalStateException(err)
             }
 
-            // Named routing lists (country IPs, ad domains, ...) prepared by the app.
+            // Named routing lists (country IPs, ad domains, ...). The app downloads them into
+            // filesDir/routelists (path_provider's application support directory) and passes name -> file name,
+            // because an Intent extra is far too small to carry them.
             o.optJSONObject("routeLists")?.let { lists ->
-                for (k in lists.keys()) {
-                    V2Tun.setRouteList(k, lists.optString(k))?.let { VpnEvents.log("warn", "Route list $k: $it") }
+                if (lists.length() > 0) {
+                    V2Tun.setRouteLists(File(filesDir, "routelists"), lists)?.let { VpnEvents.log("warn", "Route lists: $it") }
                 }
             }
 
