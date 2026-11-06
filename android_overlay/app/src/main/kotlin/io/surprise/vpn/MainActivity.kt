@@ -74,6 +74,18 @@ class MainActivity : FlutterFragmentActivity() {
         if (live && VpnEvents.sink != null) VpnEvents.importText(text) else initial = text
     }
 
+    /** Runs a blocking v2tun call off the UI thread and reports the outcome on it. */
+    private fun <T> background(result: MethodChannel.Result, code: String, work: () -> T) {
+        Thread {
+            try {
+                val v = work()
+                runOnUiThread { result.success(v) }
+            } catch (t: Throwable) {
+                runOnUiThread { result.error(code, t.message ?: t.toString(), null) }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
@@ -106,6 +118,19 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(null)
                 }
                 "status" -> result.success(VpnEvents.state)
+                // Share link -> v2tun JSON config (the library's own parser; the name is under "name").
+                "parseLink" -> {
+                    val link = call.argument<String>("link")
+                    if (link == null) { result.error("bad_args", "link missing", null); return@setMethodCallHandler }
+                    background(result, "parse") { V2Tun.parseLink(link) }
+                }
+                // Latency in ms through a v2tun config.
+                "ping" -> {
+                    val cfg = call.argument<String>("config")
+                    val url = call.argument<String>("url") ?: "cp.cloudflare.com:443"
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "ping") { V2Tun.ping(cfg, url) }
+                }
                 "initialLink" -> { result.success(initial); initial = null }
                 "requestIgnoreBattery" -> {
                     val pm = getSystemService(PowerManager::class.java)
