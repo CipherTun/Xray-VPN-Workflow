@@ -14,9 +14,9 @@ import '../core/accents.dart';
 import '../core/config_package.dart';
 import '../core/link_parser.dart';
 import '../core/models.dart';
-import '../core/ssh_tunnel.dart';
+import '../core/route_lists.dart';
+import '../core/v2tun_config.dart';
 import '../core/vpn_bridge.dart';
-import '../core/xray_config.dart';
 
 enum VpnStatus { disconnected, connecting, connected, disconnecting, error }
 
@@ -32,7 +32,6 @@ class AppState extends ChangeNotifier {
 
   final SharedPreferences prefs;
   final bridge = VpnBridge();
-  final ssh = SshTunnel();
 
   AppSettings settings = AppSettings();
   List<ServerConfig> configs = [];
@@ -170,10 +169,14 @@ class AppState extends ChangeNotifier {
     return n;
   }
 
-  /// Removes servers, settings, usage, host keys and the PIN. Cannot be undone.
+  /// Removes servers, settings, usage, downloaded route lists and the PIN. Cannot be undone.
   Future<void> wipeAll() async {
     if (status != VpnStatus.disconnected) await disconnect();
     await prefs.clear();
+    try {
+      final d = await RouteLists.dir();
+      if (await d.exists()) await d.delete(recursive: true);
+    } catch (_) {}
     configs = [];
     selectedId = null;
     settings = AppSettings();
@@ -231,6 +234,8 @@ class AppState extends ChangeNotifier {
   void remove(String id) {
     configs.removeWhere((c) => c.id == id);
     if (selectedId == id) selectedId = configs.firstOrNull?.id;
+    final ids = settings.list('failoverIds');
+    if (ids.contains(id)) settings.set('failoverIds', ids.where((x) => x != id).toList());
     _save();
     notifyListeners();
   }
@@ -329,13 +334,65 @@ class AppState extends ChangeNotifier {
     return list;
   }
 
+  // ───────── V2-TUN config ─────────
+
+  /// The V2-TUN JSON config of a profile. [forPing] leaves routing out (a latency test always goes through the
+  /// server). [backup] makes it usable as an entry of `backups`: the library only accepts routing, udpgw and
+  /// directDns on the top-level config. [quiet] drops the build warnings (used for background latency tests).
+  Map<String, dynamic> configFor(ServerConfig c, {bool forPing = false, bool backup = false, bool quiet = false}) {
+    final cfg = buildV2tunConfig(c, settings, forPing: forPing || backup, onWarn: quiet ? null : (m) => log('warn', m));
+    final pin = c.p('hostKey');
+    if (c.proto == Proto.ssh && pin.isNotEmpty) cfg['advanced'] = {'sshHostKey': pin};
+    if (backup) {
+      cfg
+        ..remove('directDns')
+        ..remove('udpgw');
+    }
+    return cfg;
+  }
+
+  /// Primary config plus, in failover mode, the chosen extra servers as ordered `backups`.
+  Map<String, dynamic> _tunnelConfig(ServerConfig c) {
+    final cfg = configFor(c);
+    if (settings.get<String>('failoverMode') == 'ordered') {
+      final backups = <Map<String, dynamic>>[];
+      for (final id in settings.list('failoverIds')) {
+        final b = _byId(id);
+        if (b == null || b.id == c.id || b.expired) continue;
+        try {
+          backups.add(configFor(b, backup: true));
+        } on V2tunConfigError catch (e) {
+          log('warn', 'Failover server "${b.name}" skipped: $e');
+        }
+      }
+      if (backups.isNotEmpty) {
+        cfg['backups'] = backups;
+        cfg['failoverTimeoutSec'] = settings.get<int>('connectTimeout');
+        log('info', 'Failover: ${backups.length} backup server(s) after "${c.name}"');
+      }
+    }
+    return cfg;
+  }
+
+  /// Makes sure the lists the routing settings need are on disk. Returns list name -> file name.
+  Future<Map<String, String>> _prepareLists({bool force = false}) async {
+    final sources = routeListSources(settings);
+    if (sources.isEmpty) return {};
+    return RouteLists.prepare(sources, force: force, maxAgeDays: settings.get<int>('listRefreshDays'), log: log);
+  }
+
+  /// Re-downloads every list the current routing settings use. They are applied the next time you connect.
+  Future<void> refreshRouteLists() async {
+    await _prepareLists(force: true);
+    notifyListeners();
+  }
+
+  // ───────── latency ─────────
+
+  /// Real latency: a request through the library with this profile, so it also proves the credentials work.
   Future<void> pingOne(ServerConfig c) async {
-    final sw = Stopwatch()..start();
     try {
-      final s = await Socket.connect(c.host, c.port, timeout: const Duration(seconds: 4));
-      sw.stop();
-      s.destroy();
-      c.pingMs = sw.elapsedMilliseconds;
+      c.pingMs = await bridge.ping(jsonEncode(configFor(c, forPing: true, quiet: true)));
     } catch (_) {
       c.pingMs = -1;
     }
@@ -343,7 +400,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> pingAll() async {
-    await Future.wait(configs.map(pingOne));
+    // A few at a time: every test builds a full tunnel client (an SSH profile does a whole handshake).
+    for (var i = 0; i < configs.length; i += 6) {
+      await Future.wait(configs.skip(i).take(6).toList().map(pingOne));
+    }
     _save();
   }
 
@@ -412,28 +472,21 @@ class AppState extends ChangeNotifier {
       if (!await bridge.prepare()) {
         throw 'VPN permission was not granted.';
       }
-      int? sshPort;
-      if (c.proto == Proto.ssh) {
-        final jumpId = settings.get<String>('sshJumpId');
-        final jump = jumpId.isEmpty || jumpId == c.id ? null : _byId(jumpId);
-        sshPort = await ssh.start(c, settings, prefs, log, onDropped: _onSshDropped, jump: jump?.proto == Proto.ssh ? jump : null);
-      }
-      final pool = [
-        for (final id in settings.list('failoverIds'))
-          if (id != c.id && _byId(id) != null && _byId(id)!.proto != Proto.ssh && !_byId(id)!.expired) _byId(id)!
-      ];
-      final chainId = settings.get<String>('chainId');
-      final chain = chainId.isEmpty || chainId == c.id ? null : _byId(chainId);
-      final cfg = buildXrayConfig(c, settings, sshSocksPort: sshPort, pool: pool, chain: chain);
+      // Throws V2tunConfigError for settings the library cannot honour (shown to the person as is).
+      final cfg = _tunnelConfig(c);
+      // The lists are fetched before the tunnel is up, so a blocked list host does not depend on the VPN.
+      final lists = await _prepareLists();
       await bridge.start(jsonEncode(cfg), {
         'name': c.name,
         'killSwitch': settings.get<bool>('killSwitch'),
         'ipv6': settings.get<bool>('ipv6'),
         'mtu': settings.get<int>('mtu'),
         'dns': dnsServersFor(settings),
+        'fakeDns': settings.get<bool>('fakeDns'),
+        'sniff': settings.get<bool>('sniffing'),
+        'routeLists': lists,
         'perAppMode': settings.get<String>('perAppMode'),
         'perApps': settings.list('perApps'),
-        'logLevel': settings.get<String>('logLevel'),
         'wakeMode': settings.get<String>('wakeMode'),
         'bootStart': settings.get<bool>('bootStart'),
         'allowBypass': settings.get<bool>('allowBypass'),
@@ -464,7 +517,6 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       log('error', 'Stop failed: $e');
     }
-    await ssh.stop();
     _setStatus(VpnStatus.disconnected);
     if (settings.get<bool>('clearLogsOnDisconnect')) clearLogs();
   }
@@ -473,14 +525,7 @@ class AppState extends ChangeNotifier {
     lastError = msg;
     log('error', msg);
     bridge.stop().catchError((_) {});
-    ssh.stop();
     _setStatus(VpnStatus.error);
-  }
-
-  void _onSshDropped() {
-    if (_userStopped) return;
-    log('warn', 'SSH session dropped');
-    _scheduleReconnect();
   }
 
   void _scheduleReconnect() {
@@ -654,7 +699,6 @@ class AppState extends ChangeNotifier {
         } else if (st == 'revoked') {
           // The user switched the VPN off from system settings or another VPN took over.
           _userStopped = true;
-          ssh.stop();
           log('warn', 'VPN was turned off by the system or another VPN app');
           _setStatus(VpnStatus.disconnected);
         } else if (st == 'disconnected') {
@@ -694,15 +738,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// HttpClient that goes through the tunnel (the app itself bypasses the VPN).
-  HttpClient tunnelClient() {
-    final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-    if (isOn) {
-      final port = settings.get<int>('socksPort') + 1;
-      c.findProxy = (_) => 'PROXY 127.0.0.1:$port';
-    }
-    return c;
-  }
+  /// HttpClient for the Tools tab. The app is not excluded from the VPN (the library protects its own sockets),
+  /// so while connected an ordinary client already goes through the tunnel.
+  HttpClient tunnelClient() => HttpClient()..connectionTimeout = const Duration(seconds: 10);
 
   @override
   void dispose() {
