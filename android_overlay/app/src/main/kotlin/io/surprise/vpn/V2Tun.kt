@@ -3,6 +3,9 @@ package io.surprise.vpn
 import android.net.VpnService
 import io.surprise.mobile.Mobile
 import io.surprise.mobile.Protector
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 
 /**
  * Thin wrapper over v2tun.aar (CipherTun/V2-TUN, gomobile package io.surprise.mobile).
@@ -47,12 +50,40 @@ object V2Tun {
         try { Mobile.stopTun() } catch (_: Throwable) {}
     }
 
-    /** Fills a `list:NAME` routing list (one domain or CIDR per line). Returns an error text or null. */
-    fun setRouteList(name: String, items: String): String? = try {
-        Mobile.setRouteList(name, items)
-        null
-    } catch (t: Throwable) {
-        t.message ?: "route list failed"
+    /**
+     * Hands the downloaded routing lists to the library with one rule rebuild.
+     * [files] maps a list name (`geoip:cn`, `geosite:cn`, ...) to a file name inside [dir]; each file holds one
+     * domain or CIDR per line. A missing or unreadable file is skipped and reported. Returns a message or null.
+     */
+    fun setRouteLists(dir: File, files: JSONObject): String? {
+        val problems = mutableListOf<String>()
+        val all = JSONObject()
+        for (name in files.keys()) {
+            val f = File(dir, files.optString(name))
+            // Never read outside the list folder, whatever Dart sent.
+            if (f.parentFile?.canonicalPath != dir.canonicalPath || !f.isFile) {
+                problems += "$name: file missing"
+                continue
+            }
+            try {
+                val arr = JSONArray()
+                f.forEachLine { l ->
+                    val t = l.trim()
+                    if (t.isNotEmpty() && !t.startsWith("#")) arr.put(t)
+                }
+                all.put(name, arr)
+            } catch (e: Exception) {
+                problems += "$name: ${e.message}"
+            }
+        }
+        if (all.length() > 0) {
+            try {
+                Mobile.setRouteLists(all.toString())
+            } catch (t: Throwable) {
+                problems += (t.message ?: "the library refused the lists")
+            }
+        }
+        return if (problems.isEmpty()) null else problems.joinToString("; ")
     }
 
     fun up(): Long = try { Mobile.trafficUp() } catch (_: Throwable) { 0L }
@@ -64,4 +95,29 @@ object V2Tun {
 
     /** Latency in ms through the given config. Throws on failure. */
     fun ping(configJson: String, url: String): Long = Mobile.ping(configJson, url)
+
+    /** Checks a payload template. Returns an error text or null when it compiles. */
+    fun validatePayload(template: String): String? = try {
+        Mobile.validatePayload(template)
+        null
+    } catch (t: Throwable) {
+        t.message ?: "invalid payload"
+    }
+
+    /** Renders a payload with visible \r\n and split markers. Throws when it does not compile. */
+    fun previewPayload(template: String, host: String, port: Int): String = Mobile.previewPayload(template, host, port.toLong())
+
+    /** Built-in payload presets, one name per line. */
+    fun payloadPresets(): String = try { Mobile.payloadPresets() } catch (_: Throwable) { "" }
+
+    /** How the running tunnel would route a connection, as JSON {"action":..,"rule":..}. Throws when not running. */
+    fun explainRoute(network: String, addr: String, protocol: String): String = Mobile.explainRoute(network, addr, protocol)
+
+    /** Swaps the routing section while connected. Returns an error text or null. */
+    fun updateRouting(routingJson: String): String? = try {
+        Mobile.updateRouting(routingJson)
+        null
+    } catch (t: Throwable) {
+        t.message ?: "routing update failed"
+    }
 }
