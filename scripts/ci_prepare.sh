@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generates the Flutter platform folders, applies the native overlay, patches Gradle
-# (min SDK, local AAR, R8 keep rules, release signing), downloads geo files and creates
-# launcher icons. Runs on a clean checkout inside GitHub Actions, no local Flutter required.
+# (min SDK, local AAR, R8 keep rules, release signing) and creates launcher icons.
+# Runs on a clean checkout inside GitHub Actions, no local Flutter required.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 
@@ -9,19 +9,13 @@ flutter create . --org io.surprise --project-name vpn --platforms android,ios
 rm -rf test   # default widget test references a template app that no longer exists
 cp -R android_overlay/app/. android/app/
 find android/app/src/main -name MainActivity.kt -not -path '*/io/surprise/vpn/*' -delete || true
-mkdir -p android/app/libs android/app/src/main/assets
-if [ -f android-libs/libv2ray.aar ]; then
-  cp -v android-libs/libv2ray.aar android/app/libs/libv2ray.aar
+mkdir -p android/app/libs
+if [ -f android-libs/v2tun.aar ]; then
+  cp -v android-libs/v2tun.aar android/app/libs/v2tun.aar
 else
-  echo "::error::android-libs/libv2ray.aar is missing, run scripts/ci_fetch_core.sh first"
+  echo "::error::android-libs/v2tun.aar is missing, run scripts/build_core.sh first"
   exit 1
 fi
-
-for f in geoip.dat geosite.dat; do
-  [ -f "android/app/src/main/assets/$f" ] || curl -fsSL --retry 3 -o "android/app/src/main/assets/$f" \
-    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
-    || echo "::warning::could not download $f"
-done
 
 # Current Flutter templates use the Gradle Kotlin DSL (build.gradle.kts) only.
 python3 - <<'PY'
@@ -33,12 +27,12 @@ try:
 except FileNotFoundError:
     sys.exit(f"::error::{path} not found. This project needs a Flutter version whose template uses the Kotlin DSL (3.29 or newer).")
 
-# 1) Minimum SDK 24 (VpnService.Builder, TrafficStats and network callbacks used by the tunnel)
+# 1) Minimum SDK 24 (VpnService.Builder and network callbacks used by the tunnel; matches gomobile -androidapi 24)
 s, n = re.subn(r"minSdk\s*=\s*flutter\.minSdkVersion", "minSdk = 24", s)
 if n == 0 and "minSdk = 24" not in s:
     print("::warning::could not find minSdk line, check android/app/build.gradle.kts")
 
-# 2) Local AAR (libv2ray = Xray-core) as a file dependency of the app module
+# 2) Local AAR (v2tun = the Go tunnel library) as a file dependency of the app module
 if "fileTree" not in s:
     s += '\ndependencies {\n    implementation(fileTree("libs") { include("*.aar", "*.jar") })\n}\n'
 

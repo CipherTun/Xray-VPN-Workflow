@@ -1,6 +1,4 @@
-# gomobile bindings (AndroidLibXrayLite) are looked up by name from native code.
--keep class libv2ray.** { *; }
+# gomobile runtime and the v2tun bindings are reached by name from native code
 -keep class go.** { *; }
+-keep class io.surprise.mobile.** { *; }
 -dontwarn go.**
--dontwarn libv2ray.**
--keepclasseswithmembernames class * { native <methods>; }
