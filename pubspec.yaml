@@ -1,7 +1,7 @@
 name: vpn
-description: XRay VPN - TUN-mode VPN client powered by Xray-core and DartSSH2.
+description: XRay VPN - TUN-mode VPN client powered by the V2-TUN tunnel library.
 publish_to: none
-version: 1.2.0+3
+version: 1.3.0+4
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -10,7 +10,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  dartssh2: ^4.1.0          # latest on pub.dev when this was written
   provider: ^6.1.2
   shared_preferences: ^2.3.2
   google_fonts: ">=6.2.1 <9.0.0"

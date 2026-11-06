@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-enum Proto { vless, vmess, trojan, shadowsocks, ssh }
+enum Proto { vless, vmess, trojan, shadowsocks, ssh, socks5, socks4, http, https, hysteria2, hysteria1 }
 
 extension ProtoX on Proto {
   String get label => switch (this) {
@@ -9,12 +9,47 @@ extension ProtoX on Proto {
         Proto.trojan => 'Trojan',
         Proto.shadowsocks => 'Shadowsocks',
         Proto.ssh => 'SSH',
+        Proto.socks5 => 'SOCKS5',
+        Proto.socks4 => 'SOCKS4',
+        Proto.http => 'HTTP',
+        Proto.https => 'HTTPS',
+        Proto.hysteria2 => 'Hysteria 2',
+        Proto.hysteria1 => 'Hysteria 1',
       };
+
+  /// Short badge text for list tiles.
+  String get badge => switch (this) {
+        Proto.vless => 'VL',
+        Proto.vmess => 'VM',
+        Proto.trojan => 'TR',
+        Proto.shadowsocks => 'SS',
+        Proto.ssh => 'SSH',
+        Proto.socks5 => 'S5',
+        Proto.socks4 => 'S4',
+        Proto.http => 'HT',
+        Proto.https => 'HS',
+        Proto.hysteria2 => 'H2',
+        Proto.hysteria1 => 'H1',
+      };
+
+  /// The `protocol` value of the V2-TUN config.
+  String get libName => switch (this) {
+        Proto.hysteria1 => 'hysteria',
+        _ => name,
+      };
+
+  /// Hysteria brings its own QUIC/TLS: no payload, transports, REALITY or fragmenting.
+  bool get isHysteria => this == Proto.hysteria2 || this == Proto.hysteria1;
+
+  /// Protocols that can share one connection through Mux.Cool.
+  bool get canMux => this == Proto.vless || this == Proto.vmess || this == Proto.trojan || this == Proto.shadowsocks;
 }
 
-/// One server profile. Protocol specific values live in [params]:
-/// id (uuid/password), method, net, security, sni, fp, pbk, sid, spx, path,
-/// host, flow, alpn, serviceName, mode, aid, user, privateKey, passphrase.
+/// One server profile. Protocol specific values live in [params] and map one to one onto the V2-TUN config:
+/// id (uuid / password / auth string), user, method, net, security (none|tls|reality), sni, fp, pbk, sid, path,
+/// host (ws/h2/xhttp host header), flow, alpn, serviceName, mode, aid, privateKey, allowInsecure,
+/// payload, payloadHost, payloadStage, proxy (HTTP proxy host:port for the payload), responseMap (e.g. 301=200),
+/// obfs, pin (hysteria2 certificate SHA-256), upMbps, downMbps.
 class ServerConfig {
   ServerConfig({
     required this.id,
@@ -92,6 +127,22 @@ class ServerConfig {
 
   static String newId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 
+  /// Profiles saved by older versions kept SSH transport settings under other keys. Moves them onto the
+  /// V2-TUN names (transport tls -> security tls, transport http -> payload with an HTTP proxy).
+  void migrate() {
+    if (proto != Proto.ssh) return;
+    final t = params.remove('transport');
+    final ph = params.remove('proxyHost') ?? '';
+    final pp = params.remove('proxyPort') ?? '';
+    final rr = params.remove('responseRewrite') ?? '';
+    if (t == 'tls') params['security'] = 'tls';
+    if (t == 'http') {
+      if (ph.isNotEmpty || pp.isNotEmpty) params['proxy'] = '${ph.isEmpty ? host : ph}:${pp.isEmpty ? port : pp}';
+      if ((params['payload'] ?? '').isEmpty) params['payload'] = '@connect';
+      if (rr.isNotEmpty) params['responseMap'] = rr;
+    }
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -140,7 +191,7 @@ class ServerConfig {
         usedBytes: j['used'] as int? ?? 0,
         blockRooted: j['noRoot'] as bool? ?? false,
         secure: j['secure'] as bool? ?? false,
-      );
+      )..migrate();
 
   @override
   String toString() => jsonEncode(toJson());
@@ -170,72 +221,48 @@ class AppSettings {
     'killSwitch': false,
     'autoReconnect': true,
     'autoConnect': false,
-    'sniffing': true,
-    'mux': false,
-    'fragment': false,
-    'allowInsecure': false,
-    'logLevel': 'warning',
-    'socksPort': 10808,
+    'haptics': true,
     'perAppMode': 'off', // off | exclude | only
     'perApps': <String>[],
-    'sshKeepAlive': 20,
-    'haptics': true,
     // strength of the Android wake/Wi-Fi locks: off | balanced | strong
     'wakeMode': 'strong',
     'bootStart': false,
     'sleepTimer': 0, // minutes, 0 = off
     'smartConnect': false, // pick the lowest-latency server on connect
-    'blockQuic': false,
     'dnsPreset': 'cloudflare', // cloudflare | google | quad9 | adguard | custom
     'customRules': '', // one per line: proxy|direct|block domain:example.com
     'pin': '', // salted hash of the app lock PIN, empty = off
     'dailyCapMb': 0, // 0 = no data warning
     'subRefreshHours': 24,
 
-    // ── Routing ──
+    // ── Routing (V2-TUN routing engine) ──
     'bypassCountry': 'none', // none | cn | ir | ru  (direct for that country's sites and IPs)
-    'blockBittorrent': false,
+    'blockQuic': false,
+    'blockBittorrent': false, // needs sniffing
     'domainStrategy': 'IPIfNonMatch', // AsIs | IPIfNonMatch | IPOnDemand
+    // Lists for geoip:XX / geosite:XX rules. V2-TUN bundles none, the app downloads these text lists.
+    'listAdsUrl': 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/reject-list.txt',
+    'listDirectUrl': 'https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt',
+    'listIpBase': 'https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text',
+    'listRefreshDays': 7,
 
     // ── DNS ──
-    'dnsRemote': '', // custom preset: comma separated servers (IPs, https://, tcp://, quic+local://)
-    'dnsDoh': false, // use DNS-over-HTTPS endpoints of the chosen provider
-    'dnsHosts': '', // static entries, one per line: `example.com 1.2.3.4`
-    'dnsStrategy': 'auto', // auto | UseIP | UseIPv4 | UseIPv6
-    'dnsCache': true,
-    'fakeDns': false,
+    'directDns': '1.1.1.1:53', // protected resolver for server and direct hostnames (bypasses the VPN)
+    'fakeDns': false, // fake-IP DNS: domain rules work for DNS based apps
+    'sniffing': true, // SNI / Host / protocol sniffing on the tunnel (needed for domain and protocol rules)
 
-    // ── Xray core ──
-    'sniffOverride': 'http,tls,quic',
-    'routeOnly': true,
+    // ── Tunnel core (V2-TUN) ──
+    'mux': false,
     'muxConcurrency': 8,
-    'xudpConcurrency': 16,
-    'xudpProxyUDP443': 'reject', // reject | allow | skip
-    'fragPackets': 'tlshello',
+    'fragment': false,
     'fragLength': '100-200',
     'fragInterval': '10-20',
-    'tcpFastOpen': false,
-    'tcpMptcp': false,
-    'tcpKeepAlive': 0, // seconds, 0 = system default
-    'sockoptDomainStrategy': 'AsIs',
+    'allowInsecure': false,
     'defaultFp': '', // uTLS fingerprint for TLS profiles that do not set one
-    'allowLan': false, // share the tunnel with other devices (SOCKS/HTTP on the LAN)
-    'localUser': '',
-    'localPass': '',
-    'failoverMode': 'off', // off | leastPing | random | roundRobin
+    'udpgw': '', // BadVPN udpgw address as seen from the server (UDP over SSH, SOCKS and HTTP proxies)
+    'connectTimeout': 15,
+    'failoverMode': 'off', // off | ordered: try the extra servers one after the other when connecting fails
     'failoverIds': <String>[],
-    'chainId': '', // entry hop for double-VPN
-    'xrayJson': '', // JSON merged over the generated config
-    'connIdle': 300,
-    'probeSeconds': 30,
-
-    // ── SSH ──
-    'sshConnectTimeout': 15,
-    'sshHostKeyPolicy': 'tofu', // tofu | strict | off
-    'sshLocalPort': 0, // 0 = socksPort + 2
-    'sshMaxConnections': 256,
-    'sshNoDelay': true,
-    'sshJumpId': '', // connect to the SSH server through another SSH profile
 
     // ── Android / privacy ──
     'allowBypass': false, // let apps opt out of the VPN
@@ -247,7 +274,6 @@ class AppSettings {
     'autoLockSec': 30, // PIN re-lock delay in seconds (0 = immediately)
     'clearLogsOnDisconnect': false,
     'monthlyCapMb': 0,
-    'geoBase': 'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download',
   };
 
   final Map<String, dynamic> _m;

@@ -1,8 +1,7 @@
 import 'package:flutter/services.dart';
 
 /// Thin wrapper over the native VPN layer.
-/// Android: XRayVpnService (VpnService + Xray-core in-process).
-/// iOS: NEPacketTunnelProvider extension running Xray-core.
+/// Android: XRayVpnService (VpnService + the V2-TUN library, v2tun.aar, in-process).
 class VpnBridge {
   static const _method = MethodChannel('io.surprise.vpn/core');
   static const _events = EventChannel('io.surprise.vpn/events');
@@ -19,6 +18,13 @@ class VpnBridge {
   Future<void> stop() => _method.invokeMethod('stop');
 
   Future<String> status() async => (await _method.invokeMethod<String>('status')) ?? 'disconnected';
+
+  /// Latency in ms of a request through the given V2-TUN config (the library's own Ping). Throws on failure.
+  Future<int> ping(String configJson, {String url = 'http://www.gstatic.com/generate_204'}) async =>
+      (await _method.invokeMethod<int>('ping', {'config': configJson, 'url': url})) ?? -1;
+
+  /// Converts a share link with the library's own parser. Returns the V2-TUN config JSON (name under "name").
+  Future<String> parseLink(String link) async => (await _method.invokeMethod<String>('parseLink', {'link': link})) ?? '';
 
   /// Launchable apps for per-app VPN (Android only).
   Future<List<Map<String, String>>> installedApps() async {
