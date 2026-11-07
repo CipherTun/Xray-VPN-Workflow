@@ -15,6 +15,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
+import java.io.File
 
 class MainActivity : FlutterFragmentActivity() {
     private var pending: MethodChannel.Result? = null
@@ -124,11 +125,12 @@ class MainActivity : FlutterFragmentActivity() {
                     if (link == null) { result.error("bad_args", "link missing", null); return@setMethodCallHandler }
                     background(result, "parse") { V2Tun.parseLink(link) }
                 }
-                // Latency in ms through a v2tun config.
+                // Latency in ms of a request (an HTTP URL) through a v2tun config.
                 "ping" -> {
                     val cfg = call.argument<String>("config")
-                    val url = call.argument<String>("url") ?: "cp.cloudflare.com:443"
+                    val url = call.argument<String>("url") ?: "http://www.gstatic.com/generate_204"
                     if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    V2Tun.installProtector() // no VPN service yet is fine: the protector then allows the socket
                     background(result, "ping") { V2Tun.ping(cfg, url) }
                 }
                 // SSH host key fingerprint ("SHA256:...") of the server in a v2tun config, without logging in.
@@ -156,6 +158,11 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 // Swap the routing section of the running tunnel; returns an error text or null.
                 "updateRouting" -> result.success(V2Tun.updateRouting(call.argument<String>("routing") ?: "{}"))
+                // Hand downloaded route lists (name -> file name in filesDir/routelists) to the running tunnel.
+                "applyRouteLists" -> {
+                    val files = call.argument<Map<String, String>>("files") ?: emptyMap()
+                    background(result, "lists") { V2Tun.setRouteLists(File(filesDir, "routelists"), JSONObject(files)) }
+                }
                 "initialLink" -> { result.success(initial); initial = null }
                 "requestIgnoreBattery" -> {
                     val pm = getSystemService(PowerManager::class.java)

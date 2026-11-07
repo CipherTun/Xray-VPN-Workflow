@@ -60,9 +60,14 @@ class AppState extends ChangeNotifier {
   DateTime? _bgAt;
   int _usageTicks = 0;
 
-  Timer? _timeout, _ticker, _retryTimer;
+  Timer? _timeout, _ticker, _retryTimer, _routingTimer;
   bool _userStopped = true;
   int _retries = 0;
+
+  /// Settings that change the routing section of the tunnel. While connected they are applied live.
+  static const _routingKeys = {
+    'routing', 'bypassCountry', 'domainStrategy', 'blockQuic', 'blockBittorrent', 'customRules', 'listAdsUrl', 'listDirectUrl', 'listIpBase',
+  };
 
   // ───────── persistence ─────────
   void _load() {
@@ -131,6 +136,7 @@ class AppState extends ChangeNotifier {
     settings.set(key, value);
     _save();
     if (key == 'secureScreen') applySecure();
+    if (isOn && _routingKeys.contains(key)) _scheduleRoutingUpdate();
     notifyListeners();
   }
 
@@ -307,7 +313,12 @@ class AppState extends ChangeNotifier {
         configs.removeWhere((c) => c.group == g);
         for (final c in fresh) {
           c.group = g;
-          c.favorite = old.where((o) => o.name == c.name).firstOrNull?.favorite ?? false;
+          final prev = old.where((o) => o.name == c.name).firstOrNull;
+          c.favorite = prev?.favorite ?? false;
+          // Keep the SSH host key that was pinned on first use when the server is the same.
+          if (prev != null && prev.host == c.host && prev.port == c.port && c.p('hostKey').isEmpty && prev.p('hostKey').isNotEmpty) {
+            c.params['hostKey'] = prev.p('hostKey');
+          }
           configs.add(c);
         }
         if (selName != null) selectedId = configs.where((c) => c.name == selName).firstOrNull?.id;
@@ -337,41 +348,49 @@ class AppState extends ChangeNotifier {
   // ───────── V2-TUN config ─────────
 
   /// The V2-TUN JSON config of a profile. [forPing] leaves routing out (a latency test always goes through the
-  /// server). [backup] makes it usable as an entry of `backups`: the library only accepts routing, udpgw and
-  /// directDns on the top-level config. [quiet] drops the build warnings (used for background latency tests).
-  Map<String, dynamic> configFor(ServerConfig c, {bool forPing = false, bool backup = false, bool quiet = false}) {
-    final cfg = buildV2tunConfig(c, settings, forPing: forPing || backup, onWarn: quiet ? null : (m) => log('warn', m));
-    final pin = c.p('hostKey');
-    if (c.proto == Proto.ssh && pin.isNotEmpty) cfg['advanced'] = {'sshHostKey': pin};
-    if (backup) {
-      cfg
-        ..remove('directDns')
-        ..remove('udpgw');
-    }
-    return cfg;
+  /// server). [quiet] drops the build warnings (used for background latency tests).
+  Map<String, dynamic> configFor(ServerConfig c, {bool forPing = false, bool quiet = false}) =>
+      buildV2tunConfig(c, settings, forPing: forPing, onWarn: quiet ? null : (m) => log('warn', m));
+
+  /// Servers tried after [c] when failover is on (the library's `backups`, in the order they were picked).
+  List<ServerConfig> _backupProfiles(ServerConfig c) {
+    if (settings.get<String>('failoverMode') != 'ordered') return const [];
+    return [
+      for (final id in settings.list('failoverIds'))
+        if (_byId(id) case final b? when b.id != c.id && !b.expired) b,
+    ];
   }
 
   /// Primary config plus, in failover mode, the chosen extra servers as ordered `backups`.
-  Map<String, dynamic> _tunnelConfig(ServerConfig c) {
-    final cfg = configFor(c);
-    if (settings.get<String>('failoverMode') == 'ordered') {
-      final backups = <Map<String, dynamic>>[];
-      for (final id in settings.list('failoverIds')) {
-        final b = _byId(id);
-        if (b == null || b.id == c.id || b.expired) continue;
-        try {
-          backups.add(configFor(b, backup: true));
-        } on V2tunConfigError catch (e) {
-          log('warn', 'Failover server "${b.name}" skipped: $e');
-        }
-      }
-      if (backups.isNotEmpty) {
-        cfg['backups'] = backups;
-        cfg['failoverTimeoutSec'] = settings.get<int>('connectTimeout');
-        log('info', 'Failover: ${backups.length} backup server(s) after "${c.name}"');
+  Map<String, dynamic> _tunnelConfig(ServerConfig c, List<ServerConfig> backups) {
+    final cfg = buildV2tunConfig(c, settings, backups: backups, onWarn: (m) => log('warn', m));
+    final n = (cfg['backups'] as List?)?.length ?? 0;
+    if (n > 0) log('info', 'Failover: $n backup server(s) after "${c.name}"');
+    return cfg;
+  }
+
+  /// Trust on first use for SSH: a profile without a pinned host key gets the key the server shows now, and
+  /// the library refuses any different key from then on. When the key cannot be read the connection goes ahead
+  /// unpinned (and says so in the log) rather than failing for a reason unrelated to the user's settings.
+  Future<void> _pinHostKeys(Iterable<ServerConfig> profiles) async {
+    var changed = false;
+    for (final c in profiles) {
+      if (c.proto != Proto.ssh || c.p('hostKey').isNotEmpty) continue;
+      try {
+        final probe = buildV2tunConfig(c, settings, forPing: true);
+        final fp = await bridge.probeHostKey(jsonEncode(probe), timeoutSec: settings.get<int>('connectTimeout'));
+        if (fp.isEmpty) continue;
+        c.params['hostKey'] = fp;
+        changed = true;
+        log('info', 'SSH host key of "${c.name}" pinned on first use: $fp');
+      } catch (e) {
+        log('warn', 'Could not read the SSH host key of "${c.name}" ($e). Connecting without pinning it.');
       }
     }
-    return cfg;
+    if (changed) {
+      _save();
+      notifyListeners();
+    }
   }
 
   /// Makes sure the lists the routing settings need are on disk. Returns list name -> file name.
@@ -381,10 +400,49 @@ class AppState extends ChangeNotifier {
     return RouteLists.prepare(sources, force: force, maxAgeDays: settings.get<int>('listRefreshDays'), log: log);
   }
 
-  /// Re-downloads every list the current routing settings use. They are applied the next time you connect.
+  /// Re-downloads every list the current routing settings use, and applies them when connected.
   Future<void> refreshRouteLists() async {
-    await _prepareLists(force: true);
+    final lists = await _prepareLists(force: true);
+    if (isOn && lists.isNotEmpty) {
+      final err = await bridge.applyRouteLists(lists);
+      if (err != null) log('warn', 'Route lists: $err');
+    }
     notifyListeners();
+  }
+
+  void _scheduleRoutingUpdate() {
+    _routingTimer?.cancel();
+    _routingTimer = Timer(const Duration(milliseconds: 700), applyRoutingLive);
+  }
+
+  /// Applies the current routing settings to the running tunnel without reconnecting: the new rules first, then
+  /// the lists they need (a new country, for example, has to be downloaded).
+  Future<void> applyRoutingLive() async {
+    if (!isOn) return;
+    try {
+      final err = await bridge.updateRouting(jsonEncode(buildRouting(settings, onWarn: (m) => log('warn', m))));
+      if (err != null) {
+        log('warn', 'Routing could not be changed while connected ($err). It applies the next time you connect.');
+        return;
+      }
+      final lists = await _prepareLists();
+      if (lists.isNotEmpty) {
+        final e2 = await bridge.applyRouteLists(lists);
+        if (e2 != null) log('warn', 'Route lists: $e2');
+      }
+      log('info', 'Routing updated');
+    } catch (e) {
+      log('warn', 'Routing update failed: $e');
+    }
+  }
+
+  /// How the running tunnel routes [host] ("example.com" or "example.com:443"), as text. Null when not connected.
+  Future<String?> explainRoute(String host, {String protocol = ''}) async {
+    final addr = host.contains(':') && !host.contains(']') && host.split(':').length == 2 ? host : '$host:443';
+    final r = await bridge.explainRoute(addr, protocol: protocol);
+    if (r == null) return null;
+    final rule = (r['rule'] as String?) ?? '';
+    return '${(r['action'] as String? ?? '?').toUpperCase()}${rule.isEmpty ? '' : ' · $rule'}';
   }
 
   // ───────── latency ─────────
@@ -472,9 +530,11 @@ class AppState extends ChangeNotifier {
       if (!await bridge.prepare()) {
         throw 'VPN permission was not granted.';
       }
+      final backups = _backupProfiles(c);
+      // Before the tunnel is up, so the key probe and the list downloads do not depend on the VPN.
+      await _pinHostKeys([c, ...backups]);
       // Throws V2tunConfigError for settings the library cannot honour (shown to the person as is).
-      final cfg = _tunnelConfig(c);
-      // The lists are fetched before the tunnel is up, so a blocked list host does not depend on the VPN.
+      final cfg = _tunnelConfig(c, backups);
       final lists = await _prepareLists();
       await bridge.start(jsonEncode(cfg), {
         'name': c.name,
@@ -498,8 +558,12 @@ class AppState extends ChangeNotifier {
       final limits = [settings.get<int>('sleepTimer'), c.maxSessionMin ?? 0].where((m) => m > 0).toList()..sort();
       final mins = limits.isEmpty ? 0 : limits.first;
       sleepAt = mins > 0 ? DateTime.now().add(Duration(minutes: mins)) : null;
+      // The library allows each server its own attempt (12 s, or the connect timeout when that is longer),
+      // so with backups the overall limit has to cover all of them.
+      final each = max(12, settings.get<int>('connectTimeout'));
+      final servers = 1 + ((cfg['backups'] as List?)?.length ?? 0);
       _timeout?.cancel();
-      _timeout = Timer(const Duration(seconds: 25), () {
+      _timeout = Timer(Duration(seconds: each * servers + 10), () {
         if (status == VpnStatus.connecting) _fail('Connection timed out.');
       });
     } catch (e) {
@@ -747,6 +811,7 @@ class AppState extends ChangeNotifier {
     _ticker?.cancel();
     _timeout?.cancel();
     _retryTimer?.cancel();
+    _routingTimer?.cancel();
     super.dispose();
   }
 }
