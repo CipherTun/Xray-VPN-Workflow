@@ -101,6 +101,16 @@ Map<String, String> routeListSources(AppSettings s, {void Function(String messag
   return n != null ? (n, n) : (a, b);
 }
 
+/// uTLS names the library accepts: chrome, firefox, safari, ios, android, edge, random. Xray-style links also say
+/// "randomized"; V2-TUN rejects unknown names instead of quietly sending Go's own recognisable hello.
+String normalizeFingerprint(String v) {
+  final l = v.trim().toLowerCase();
+  return switch (l) {
+    'randomized' || 'randomizedalpn' || 'randomizednoalpn' => 'random',
+    _ => l,
+  };
+}
+
 /// Result of [migratePayload].
 class PayloadMigration {
   PayloadMigration(this.template, {this.sni, this.warnings = const []});
@@ -170,7 +180,7 @@ Map<String, dynamic> buildV2tunConfig(
   };
 
   final insecure = s.get<bool>('allowInsecure') || c.p('allowInsecure') == '1';
-  final fp = c.p('fp').isNotEmpty ? c.p('fp') : s.get<String>('defaultFp');
+  final fp = normalizeFingerprint(c.p('fp').isNotEmpty ? c.p('fp') : s.get<String>('defaultFp'));
   final host = c.p('host');
   final sniOr = c.p('sni').isNotEmpty ? c.p('sni') : (host.isNotEmpty ? host : c.host);
 
@@ -196,14 +206,14 @@ Map<String, dynamic> buildV2tunConfig(
       cfg['username'] = c.p('user');
       cfg['password'] = c.p('id');
       if (c.p('privateKey').isNotEmpty) cfg['privateKey'] = c.p('privateKey');
-      if (c.p('passphrase').isNotEmpty) onWarn?.call('SSH key passphrases are not supported by the tunnel library; use an unencrypted key.');
+      if (c.p('passphrase').isNotEmpty) onWarn?.call('SSH key passphrases are not supported by the tunnel library; use an unencrypted private key.');
       // Host key pin: an OpenSSH "SHA256:..." fingerprint or 64 hex characters (profile parameter `hostKey`).
-      // The library cannot learn a key on first use, so a pin has to be entered; without one any key is accepted.
+      // The app fills it in on the first connection (trust on first use, see AppState); a changed key is refused.
       final pin = c.p('hostKey').trim();
       if (pin.isNotEmpty) {
         cfg['advanced'] = {'sshHostKey': pin};
       } else {
-        onWarn?.call('${c.host}: no SSH host key fingerprint is set, so any host key is accepted.');
+        onWarn?.call('${c.host}: no SSH host key is pinned yet, so any host key is accepted.');
       }
     case Proto.socks5:
     case Proto.socks4:
@@ -300,7 +310,7 @@ Map<String, dynamic> buildV2tunConfig(
     if (gw.isNotEmpty) cfg['udpgw'] = gw;
   }
 
-  if (!forPing && !asBackup) cfg['routing'] = _routing(s, onWarn);
+  if (!forPing && !asBackup) cfg['routing'] = buildRouting(s, onWarn: onWarn);
 
   if (!asBackup && backups.isNotEmpty) {
     final list = <Map<String, dynamic>>[];
@@ -321,7 +331,9 @@ Map<String, dynamic> buildV2tunConfig(
   return cfg;
 }
 
-Map<String, dynamic> _routing(AppSettings s, void Function(String)? onWarn) {
+/// The `routing` section of the V2-TUN config for the current settings. Also what `UpdateRouting` takes to change
+/// the rules of a running tunnel.
+Map<String, dynamic> buildRouting(AppSettings s, {void Function(String message)? onWarn}) {
   final mode = s.get<String>('routing');
   final cc = s.get<String>('bypassCountry');
   routeListSources(s, onWarn: onWarn); // reports lists without a source
