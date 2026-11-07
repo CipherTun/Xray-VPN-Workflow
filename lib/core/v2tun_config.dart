@@ -101,6 +101,26 @@ Map<String, String> routeListSources(AppSettings s, {void Function(String messag
   return n != null ? (n, n) : (a, b);
 }
 
+/// "a, b; c" or one per line -> ['a', 'b', 'c'] (empty entries dropped).
+List<String> parseCsv(String text) => [
+      for (final p in text.split(RegExp(r'[,;\n]+')))
+        if (p.trim().isNotEmpty) p.trim(),
+    ];
+
+/// "Name: value" or "name=value", one per line -> {"Name": "value"}. Lines starting with # are ignored.
+Map<String, String> parseKeyValueLines(String text) {
+  final out = <String, String>{};
+  for (final raw in text.split('\n')) {
+    final line = raw.trim();
+    if (line.isEmpty || line.startsWith('#')) continue;
+    final i = line.indexOf(RegExp(r'[:=]'));
+    if (i <= 0) continue;
+    final k = line.substring(0, i).trim();
+    if (k.isNotEmpty) out[k] = line.substring(i + 1).trim();
+  }
+  return out;
+}
+
 /// uTLS names the library accepts: chrome, firefox, safari, ios, android, edge, random. Xray-style links also say
 /// "randomized"; V2-TUN rejects unknown names instead of quietly sending Go's own recognisable hello.
 String normalizeFingerprint(String v) {
@@ -179,6 +199,12 @@ Map<String, dynamic> buildV2tunConfig(
     if (!asBackup) 'directDns': s.get<String>('directDns'),
   };
 
+  // Closes a tunneled connection after this long without data (top-level only, like the library wants).
+  if (!asBackup) {
+    final idle = s.get<int>('idleTimeout');
+    if (idle > 0) cfg['idleTimeoutSec'] = idle;
+  }
+
   final insecure = s.get<bool>('allowInsecure') || c.p('allowInsecure') == '1';
   final fp = normalizeFingerprint(c.p('fp').isNotEmpty ? c.p('fp') : s.get<String>('defaultFp'));
   final host = c.p('host');
@@ -207,20 +233,50 @@ Map<String, dynamic> buildV2tunConfig(
       cfg['password'] = c.p('id');
       if (c.p('privateKey').isNotEmpty) cfg['privateKey'] = c.p('privateKey');
       if (c.p('passphrase').isNotEmpty) onWarn?.call('SSH key passphrases are not supported by the tunnel library; use an unencrypted private key.');
+      final adv = <String, dynamic>{};
       // Host key pin: an OpenSSH "SHA256:..." fingerprint or 64 hex characters (profile parameter `hostKey`).
       // The app fills it in on the first connection (trust on first use, see AppState); a changed key is refused.
       final pin = c.p('hostKey').trim();
       if (pin.isNotEmpty) {
-        cfg['advanced'] = {'sshHostKey': pin};
+        adv['sshHostKey'] = pin;
       } else {
         onWarn?.call('${c.host}: no SSH host key is pinned yet, so any host key is accepted.');
       }
+      // Algorithm lists (Library options). Empty keeps the library's maximum-compatibility defaults.
+      final ciphers = parseCsv(c.p('sshCiphers'));
+      final kex = parseCsv(c.p('sshKex'));
+      final macs = parseCsv(c.p('sshMacs'));
+      final hostKeys = parseCsv(c.p('sshHostKeys'));
+      if (ciphers.isNotEmpty) adv['sshCiphers'] = ciphers;
+      if (kex.isNotEmpty) adv['sshKex'] = kex;
+      if (macs.isNotEmpty) adv['sshMacs'] = macs;
+      if (hostKeys.isNotEmpty) adv['sshHostKeys'] = hostKeys;
+      // Double hop: this server is the jump host, sshNext is where the traffic exits.
+      final next = c.p('sshNextServer').trim();
+      if (next.isNotEmpty) {
+        if (!RegExp(r'^(\[[^\]]+\]|[^\s:\[\]]+):\d{1,5}$').hasMatch(next)) {
+          throw V2tunConfigError('The second SSH hop must be written as host:port.');
+        }
+        adv['sshNext'] = {
+          'server': next,
+          'username': c.p('sshNextUser'),
+          'password': c.p('sshNextPass'),
+          if (c.p('sshNextKey').isNotEmpty) 'privateKey': c.p('sshNextKey'),
+          if (c.p('sshNextHostKey').trim().isNotEmpty) 'hostKey': c.p('sshNextHostKey').trim(),
+        };
+        if (c.p('sshNextHostKey').trim().isEmpty) onWarn?.call('The second SSH hop has no pinned host key, so any host key is accepted.');
+      }
+      if (adv.isNotEmpty) cfg['advanced'] = adv;
     case Proto.socks5:
     case Proto.socks4:
     case Proto.http:
     case Proto.https:
       cfg['username'] = c.p('user');
       cfg['password'] = c.p('id');
+      if (p == Proto.http || p == Proto.https) {
+        final hdrs = parseKeyValueLines(c.p('proxyHeaders'));
+        if (hdrs.isNotEmpty) cfg['proxyHeaders'] = hdrs;
+      }
     case Proto.hysteria2:
       cfg['password'] = c.p('id');
       cfg['tls'] = {'sni': sniOr, 'allowInsecure': insecure};
@@ -249,11 +305,30 @@ Map<String, dynamic> buildV2tunConfig(
     if (net != 'tcp') cfg['network'] = net == 'splithttp' ? 'xhttp' : net;
     final path = c.p('path');
     if (net == 'ws' || net == 'httpupgrade' || net == 'h2' || net == 'http' || net == 'xhttp' || net == 'splithttp') {
-      cfg['ws'] = {if (host.isNotEmpty) 'host': host, 'path': path.isEmpty ? '/' : path};
+      final hdrs = parseKeyValueLines(c.p('wsHeaders'));
+      // Keepalive ping frames exist for the plain WebSocket transport only.
+      final ping = net == 'ws' ? (int.tryParse(c.p('wsPing')) ?? 0) : 0;
+      cfg['ws'] = {
+        if (host.isNotEmpty) 'host': host,
+        'path': path.isEmpty ? '/' : path,
+        if (hdrs.isNotEmpty) 'headers': hdrs,
+        if (ping > 0) 'pingSec': ping,
+      };
     }
     if (net == 'grpc') cfg['grpcService'] = c.p('serviceName');
     if (net == 'xhttp' || net == 'splithttp') {
       if (c.p('mode').isNotEmpty) cfg['xhttpMode'] = c.p('mode');
+      final pad = c.p('xPadding');
+      final maxPost = int.tryParse(c.p('xMaxPost')) ?? 0;
+      final minGap = int.tryParse(c.p('xMinInterval')) ?? 0;
+      if (pad.isNotEmpty || maxPost > 0 || minGap > 0) {
+        final pr = _pair(pad, 0, 0);
+        cfg['xhttp'] = {
+          if (pad.isNotEmpty) 'xPaddingBytes': [pr.$1, pr.$2],
+          if (maxPost > 0) 'scMaxEachPostBytes': maxPost,
+          if (minGap > 0) 'scMinPostsIntervalMs': minGap,
+        };
+      }
     }
 
     final sec = p == Proto.https ? 'tls' : c.p('security', 'none');
@@ -286,12 +361,22 @@ Map<String, dynamic> buildV2tunConfig(
       }
       if (m.sni != null && cfg['tls'] is Map && c.p('sni').isEmpty) (cfg['tls'] as Map)['sni'] = m.sni;
       final map = parseResponseMap(c.p('responseMap'));
+      final vars = parseKeyValueLines(c.p('payloadVars'));
+      final expect = switch (c.p('expectResponse')) { 'yes' => true, 'no' => false, _ => null };
+      final replies = int.tryParse(c.p('expectResponses')) ?? 0;
+      final codes = [for (final x in parseCsv(c.p('expectCodes'))) if (int.tryParse(x) != null) int.parse(x)];
       cfg['payload'] = {
         'template': m.template,
         if (c.p('payloadHost').isNotEmpty) 'host': c.p('payloadHost'),
+        if (c.p('payloadMethod').isNotEmpty) 'method': c.p('payloadMethod'),
+        if (c.p('payloadUA').isNotEmpty) 'userAgent': c.p('payloadUA'),
         if (c.p('payloadStage') == 'post-tls') 'stage': 'post-tls',
         if (c.p('proxy').isNotEmpty) 'proxy': c.p('proxy'),
+        if (expect != null) 'expectResponse': expect,
+        if (replies > 0) 'expectResponses': replies,
+        if (codes.isNotEmpty) 'expectCodes': codes,
         if (map.isNotEmpty) 'responseMap': map,
+        if (vars.isNotEmpty) 'vars': vars,
       };
     }
 
@@ -326,6 +411,9 @@ Map<String, dynamic> buildV2tunConfig(
       // V2-TUN gives each server 12 s by default; a slow payload bootstrap can need longer.
       final t = s.get<int>('connectTimeout');
       if (t > 12) cfg['failoverTimeoutSec'] = t;
+      // Re-measure the servers now and then and, after a failure, try the quickest first.
+      final sort = s.get<int>('latencySort');
+      if (sort > 0) cfg['latencySortSec'] = sort;
     }
   }
   return cfg;
