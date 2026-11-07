@@ -50,6 +50,11 @@ extension ProtoX on Proto {
 /// host (ws/h2/xhttp host header), flow, alpn, serviceName, mode, aid, privateKey, allowInsecure,
 /// payload, payloadHost, payloadStage, proxy (HTTP proxy host:port for the payload), responseMap (e.g. 301=200),
 /// obfs, pin (hysteria2 certificate SHA-256), upMbps, downMbps.
+///
+/// Library options edited on the "Library options" page (see ui/library_options_page.dart):
+/// wsPing, wsHeaders, payloadMethod, payloadUA, payloadVars, expectResponse (auto|yes|no), expectCodes,
+/// expectResponses, xPadding, xMaxPost, xMinInterval, proxyHeaders, sshCiphers, sshKex, sshMacs, sshHostKeys,
+/// sshNextServer, sshNextUser, sshNextPass, sshNextKey, sshNextHostKey.
 class ServerConfig {
   ServerConfig({
     required this.id,
@@ -263,6 +268,8 @@ class AppSettings {
     'connectTimeout': 15,
     'failoverMode': 'off', // off | ordered: try the extra servers one after the other when connecting fails
     'failoverIds': <String>[],
+    'idleTimeout': 0, // seconds without data before a tunneled connection is closed (V2-TUN idleTimeoutSec), 0 = never
+    'latencySort': 0, // with failover: re-measure the servers every N seconds and try the quickest first (V2-TUN latencySortSec), 0 = listed order
 
     // ── Android / privacy ──
     'allowBypass': false, // let apps opt out of the VPN
