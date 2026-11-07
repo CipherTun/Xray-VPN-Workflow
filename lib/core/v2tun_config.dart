@@ -146,6 +146,9 @@ const _nets = {'tcp', 'ws', 'httpupgrade', 'h2', 'http', 'grpc', 'quic', 'xhttp'
 /// Builds the V2-TUN JSON config for a profile (the format of v2tun.Config).
 ///
 /// [forPing] leaves routing out so a latency test always goes through the server.
+/// [backups] are complete profiles tried in order, after [c], when [c] cannot connect (V2-TUN `backups`: the one
+/// that worked last is tried first next time). A backup the library cannot carry is skipped with a warning.
+/// [asBackup] builds the entry of a `backups` list: V2-TUN wants routing, udpgw and directDns only at the top level.
 /// [onWarn] receives things that were changed or left out on purpose.
 /// Throws [V2tunConfigError] for settings the tunnel library cannot honour: a connection that silently ignores
 /// them would only fail later (or, for certificate pinning, run unpinned).
@@ -153,6 +156,8 @@ Map<String, dynamic> buildV2tunConfig(
   ServerConfig c,
   AppSettings s, {
   bool forPing = false,
+  bool asBackup = false,
+  List<ServerConfig> backups = const [],
   void Function(String message)? onWarn,
 }) {
   final p = c.proto;
@@ -161,7 +166,7 @@ Map<String, dynamic> buildV2tunConfig(
     'server': c.host,
     'port': c.port,
     'timeoutSec': s.get<int>('connectTimeout'),
-    'directDns': s.get<String>('directDns'),
+    if (!asBackup) 'directDns': s.get<String>('directDns'),
   };
 
   final insecure = s.get<bool>('allowInsecure') || c.p('allowInsecure') == '1';
@@ -192,6 +197,14 @@ Map<String, dynamic> buildV2tunConfig(
       cfg['password'] = c.p('id');
       if (c.p('privateKey').isNotEmpty) cfg['privateKey'] = c.p('privateKey');
       if (c.p('passphrase').isNotEmpty) onWarn?.call('SSH key passphrases are not supported by the tunnel library; use an unencrypted key.');
+      // Host key pin: an OpenSSH "SHA256:..." fingerprint or 64 hex characters (profile parameter `hostKey`).
+      // The library cannot learn a key on first use, so a pin has to be entered; without one any key is accepted.
+      final pin = c.p('hostKey').trim();
+      if (pin.isNotEmpty) {
+        cfg['advanced'] = {'sshHostKey': pin};
+      } else {
+        onWarn?.call('${c.host}: no SSH host key fingerprint is set, so any host key is accepted.');
+      }
     case Proto.socks5:
     case Proto.socks4:
     case Proto.http:
@@ -282,10 +295,29 @@ Map<String, dynamic> buildV2tunConfig(
     }
   }
 
-  final gw = s.get<String>('udpgw').trim();
-  if (gw.isNotEmpty) cfg['udpgw'] = gw;
+  if (!asBackup) {
+    final gw = s.get<String>('udpgw').trim();
+    if (gw.isNotEmpty) cfg['udpgw'] = gw;
+  }
 
-  if (!forPing) cfg['routing'] = _routing(s, onWarn);
+  if (!forPing && !asBackup) cfg['routing'] = _routing(s, onWarn);
+
+  if (!asBackup && backups.isNotEmpty) {
+    final list = <Map<String, dynamic>>[];
+    for (final b in backups) {
+      try {
+        list.add(buildV2tunConfig(b, s, asBackup: true, onWarn: onWarn));
+      } on V2tunConfigError catch (e) {
+        onWarn?.call('Backup ${b.host} skipped: ${e.message}');
+      }
+    }
+    if (list.isNotEmpty) {
+      cfg['backups'] = list;
+      // V2-TUN gives each server 12 s by default; a slow payload bootstrap can need longer.
+      final t = s.get<int>('connectTimeout');
+      if (t > 12) cfg['failoverTimeoutSec'] = t;
+    }
+  }
   return cfg;
 }
 
