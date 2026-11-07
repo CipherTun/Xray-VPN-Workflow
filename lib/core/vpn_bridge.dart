@@ -1,6 +1,22 @@
 import 'package:flutter/services.dart';
 import 'dart:convert';
 
+/// One row of a host scan: the value that was tried and how it went.
+class ScanResult {
+  ScanResult(this.value, this.ok, this.ms, this.error);
+  final String value;
+  final bool ok;
+  final int ms;
+  final String error;
+
+  factory ScanResult.fromJson(Map<String, dynamic> j) => ScanResult(
+        (j['value'] ?? j['Value'] ?? '').toString(),
+        (j['ok'] ?? j['Ok'] ?? false) == true,
+        ((j['ms'] ?? j['Ms'] ?? 0) as num).toInt(),
+        (j['error'] ?? j['Error'] ?? '').toString(),
+      );
+}
+
 /// Thin wrapper over the native VPN layer.
 /// Android: XRayVpnService (VpnService + the V2-TUN library, v2tun.aar, in-process).
 class VpnBridge {
@@ -54,6 +70,71 @@ class VpnBridge {
       return t.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
     } on MissingPluginException {
       return [];
+    }
+  }
+
+  /// Checks a whole V2-TUN config without connecting (the library's own Validate). Returns the reason the config
+  /// is invalid, or null when it is fine.
+  Future<String?> validateConfig(String configJson) async {
+    try {
+      final r = await _method.invokeMethod<String>('validate', {'config': configJson});
+      return (r == null || r.isEmpty) ? null : r;
+    } on PlatformException catch (e) {
+      return e.message ?? 'invalid config';
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
+  /// What the payload of a config would send and how the server's reply is checked, without connecting.
+  /// Throws when the payload is invalid.
+  Future<String> payloadPreviewFor(String configJson) async =>
+      (await _method.invokeMethod<String>('payloadPreview', {'config': configJson})) ?? '';
+
+  /// Downloads [url] (empty: the library's default endpoint) through the config for up to [seconds] and returns
+  /// (bytes, bits per second). Works with or without a running VPN. Throws on failure.
+  Future<(int, double)> speedTest(String configJson, {String url = '', int seconds = 10}) async {
+    final t = await _method.invokeMethod<String>('speedTest', {'config': configJson, 'url': url, 'seconds': seconds}) ?? '{}';
+    final j = Map<String, dynamic>.from(jsonDecode(t) as Map);
+    return (((j['bytes'] ?? 0) as num).toInt(), ((j['bps'] ?? 0) as num).toDouble());
+  }
+
+  /// Tries the config once per entry of [values] (one per line) with that entry in [field] (server, tls.sni,
+  /// ws.host, payload.host or payload.proxy). A [target] that is a URL is fetched through the tunnel, a host:port
+  /// is only dialed. Throws on a bad config or field.
+  Future<List<ScanResult>> scanHosts(
+    String configJson, {
+    required String field,
+    required String values,
+    required String target,
+    int concurrency = 3,
+    int seconds = 15,
+  }) async {
+    final t = await _method.invokeMethod<String>('scanHosts', {
+          'config': configJson,
+          'field': field,
+          'values': values,
+          'target': target,
+          'concurrency': concurrency,
+          'seconds': seconds,
+        }) ??
+        '[]';
+    final raw = jsonDecode(t);
+    if (raw is! List) return [];
+    return [for (final e in raw) ScanResult.fromJson(Map<String, dynamic>.from(e as Map))];
+  }
+
+  /// Dials [target] (host:port) through the config and closes again. Throws when the target cannot be reached.
+  Future<void> probe(String configJson, String target) async {
+    await _method.invokeMethod('probe', {'config': configJson, 'target': target});
+  }
+
+  /// Which config the running tunnel uses: 0 is the main server, 1 the first backup, and so on. -1 when nothing runs.
+  Future<int> activeOutbound() async {
+    try {
+      return (await _method.invokeMethod<int>('activeOutbound')) ?? -1;
+    } on MissingPluginException {
+      return -1;
     }
   }
 
