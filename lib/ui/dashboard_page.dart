@@ -144,8 +144,9 @@ class DashboardPage extends StatelessWidget {
                   label: Text(l),
                   selected: s.settings.get<String>('routing') == v,
                   onSelected: (_) {
+                    // While connected, AppState hands the new rules to the running tunnel.
                     s.setSetting('routing', v);
-                    if (s.isOn) toast(context, 'Routing changes apply the next time you connect.');
+                    if (s.isOn) toast(context, 'Applying the new routing to the running tunnel…');
                   },
                   showCheckmark: false,
                   selectedColor: p.accentSoft,
