@@ -35,7 +35,7 @@ class ConfigsPage extends StatelessWidget {
                 child: EmptyState(
                   icon: Icons.cloud_off_rounded,
                   title: 'No servers yet',
-                  body: 'Paste a vless://, vmess://, trojan://, ss:// or ssh:// link, import a subscription, or add an SSH server by hand.',
+                  body: 'Paste a vless://, vmess://, trojan://, ss://, ssh://, socks5://, http://, hysteria2:// or hy2:// link, import a subscription, or add a server by hand.',
                   action: FilledButton.icon(
                     onPressed: () => showAddSheet(context),
                     icon: const Icon(Icons.add_rounded),
@@ -64,6 +64,7 @@ class _ConfigTile extends StatelessWidget {
     final s = context.read<AppState>();
     final p = context.pal;
     final isSel = context.select<AppState, bool>((s) => s.selectedId == c.id);
+    final inFailover = context.select<AppState, bool>((s) => s.settings.get<String>('failoverMode') == 'ordered' && s.settings.list('failoverIds').contains(c.id));
     return Dismissible(
       key: ValueKey(c.id),
       direction: DismissDirection.endToStart,
@@ -93,6 +94,7 @@ class _ConfigTile extends StatelessWidget {
                 Flexible(child: Text(c.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15.5))),
                 if (c.locked) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(Icons.lock_rounded, size: 14, color: p.dim)),
                 if (c.favorite) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(Icons.star_rounded, size: 16, color: p.warn)),
+                if (inFailover) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(Icons.swap_horiz_rounded, size: 16, color: p.steel)),
               ]),
               const SizedBox(height: 3),
               Text('${c.proto.label}${c.p('net') == '' || c.p('net') == 'tcp' ? '' : ' · ${c.p('net')}'}${c.p('security', 'none') == 'none' ? '' : ' · ${c.p('security')}'}  ·  ${c.locked ? (c.author.isEmpty ? 'Locked' : 'From ${c.author}') : c.host}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.dim, fontSize: 12)),
@@ -114,6 +116,8 @@ class _ConfigTile extends StatelessWidget {
 
 void showConfigMenu(BuildContext context, ServerConfig c) {
   final s = context.read<AppState>();
+  final failoverOn = s.settings.get<String>('failoverMode') == 'ordered';
+  final inFailover = s.settings.list('failoverIds').contains(c.id);
   showModalBottomSheet(
     context: context,
     builder: (ctx) => SafeArea(
@@ -123,6 +127,17 @@ void showConfigMenu(BuildContext context, ServerConfig c) {
         if (c.allowShare) ListTile(leading: const Icon(Icons.ios_share_rounded), title: const Text('Share…'), subtitle: const Text('Note, expiry, lock, password'), onTap: () { Navigator.pop(ctx); Navigator.of(context).push(MaterialPageRoute(builder: (_) => SharePage(initial: c))); }),
         ListTile(leading: Icon(c.favorite ? Icons.star_border_rounded : Icons.star_rounded), title: Text(c.favorite ? 'Remove favorite' : 'Mark as favorite'), onTap: () { Navigator.pop(ctx); s.toggleFavorite(c); }),
         ListTile(leading: const Icon(Icons.speed_rounded), title: const Text('Test latency'), onTap: () { Navigator.pop(ctx); s.pingOne(c); }),
+        if (failoverOn && !c.expired)
+          ListTile(
+            leading: const Icon(Icons.swap_horiz_rounded),
+            title: Text(inFailover ? 'Remove from failover list' : 'Use as failover server'),
+            subtitle: const Text('Tried in order when the selected server cannot connect'),
+            onTap: () {
+              Navigator.pop(ctx);
+              final ids = s.settings.list('failoverIds');
+              s.setSetting('failoverIds', inFailover ? ids.where((x) => x != c.id).toList() : [...ids, c.id]);
+            },
+          ),
         if (!c.locked) ListTile(
           leading: const Icon(Icons.copy_rounded),
           title: const Text('Copy plain link'),
@@ -244,7 +259,7 @@ void showAddSheet(BuildContext context) {
         ListTile(
           leading: const Icon(Icons.terminal_rounded),
           title: const Text('Add SSH server'),
-          subtitle: const Text('Tunnel through any SSH host (DartSSH2)'),
+          subtitle: const Text('Direct, over TLS, over WebSocket or with an HTTP payload'),
           onTap: () {
             Navigator.pop(ctx);
             showConfigEditor(context, null, startProto: Proto.ssh);
@@ -253,7 +268,7 @@ void showAddSheet(BuildContext context) {
         ListTile(
           leading: const Icon(Icons.edit_note_rounded),
           title: const Text('Add manually'),
-          subtitle: const Text('VLESS, VMess, Trojan, Shadowsocks'),
+          subtitle: const Text('VLESS, VMess, Trojan, Shadowsocks, SOCKS, HTTP, Hysteria'),
           onTap: () {
             Navigator.pop(ctx);
             showConfigEditor(context, null);
@@ -311,10 +326,24 @@ class _EditorState extends State<_Editor> {
   late Proto proto = widget.existing?.proto ?? widget.startProto;
   late final Map<String, TextEditingController> t;
   late String net = widget.existing?.p('net', 'tcp') ?? 'tcp';
-  late String transport = widget.existing?.p('transport', 'direct') ?? 'direct';
   late String sec = widget.existing?.p('security', 'none') ?? 'none';
+  late String stage = widget.existing?.p('payloadStage', 'pre-tls') ?? 'pre-tls';
+  late bool insecure = widget.existing?.p('allowInsecure') == '1';
 
-  static const keys = ['name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'method', 'aid', 'sni', 'fp', 'path', 'hostHdr', 'flow', 'pbk', 'sid', 'serviceName', 'proxyHost', 'proxyPort', 'payload', 'responseRewrite'];
+  static const keys = [
+    'name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'hostKey', 'method', 'aid', 'sni', 'fp', 'alpn', 'path', 'hostHdr',
+    'flow', 'pbk', 'sid', 'serviceName', 'obfs', 'pin', 'upMbps', 'downMbps', 'payload', 'payloadHost', 'proxy', 'responseMap',
+  ];
+
+  /// Protocols that carry a network / security choice (the library applies them to the whole non-Hysteria family).
+  bool get _hasTransport => proto == Proto.vless || proto == Proto.vmess || proto == Proto.trojan || proto == Proto.ssh;
+  bool get _userPass => proto == Proto.ssh || proto == Proto.socks5 || proto == Proto.http || proto == Proto.https;
+  int get _defaultPort => switch (proto) {
+        Proto.ssh => 22,
+        Proto.socks5 || Proto.socks4 => 1080,
+        Proto.http => 8080,
+        _ => 443,
+      };
 
   @override
   void initState() {
@@ -326,7 +355,7 @@ class _EditorState extends State<_Editor> {
           text: switch (k) {
             'name' => e?.name ?? '',
             'host' => e?.host ?? '',
-            'port' => '${e?.port ?? (proto == Proto.ssh ? 22 : 443)}',
+            'port' => '${e?.port ?? _defaultPort}',
             'hostHdr' => e?.p('host') ?? '',
             _ => e?.p(k) ?? '',
           },
@@ -342,7 +371,7 @@ class _EditorState extends State<_Editor> {
     super.dispose();
   }
 
-  Widget _f(String k, String label, {bool obscure = false, int lines = 1, TextInputType? type}) => Padding(
+  Widget _f(String k, String label, {bool obscure = false, int lines = 1, TextInputType? type, String? hint}) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child: TextField(
           controller: t[k],
@@ -351,7 +380,7 @@ class _EditorState extends State<_Editor> {
           maxLines: lines,
           keyboardType: type,
           autocorrect: false,
-          decoration: InputDecoration(labelText: label, filled: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none)),
+          decoration: InputDecoration(labelText: label, hintText: hint, filled: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none)),
         ),
       );
 
@@ -367,6 +396,19 @@ class _EditorState extends State<_Editor> {
     );
   }
 
+  Widget _note(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Text(text, style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
+      );
+
+  Widget _insecureSwitch() => SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        value: insecure,
+        onChanged: (v) => setState(() => insecure = v),
+        title: const Text('Allow insecure certificate'),
+        subtitle: const Text('Skips certificate checks. Only for servers you control.'),
+      );
+
   void _save() {
     final host = t['host']!.text.trim();
     final port = int.tryParse(t['port']!.text.trim());
@@ -374,35 +416,83 @@ class _EditorState extends State<_Editor> {
       toast(context, 'Enter a host and a valid port.');
       return;
     }
-    final params = <String, String>{};
+    // Start from what the profile already has, so parameters this form does not show (mode, spx, ...) survive.
+    final params = Map<String, String>.from(widget.existing?.params ?? const <String, String>{});
     void put(String k, [String? src]) {
       final v = t[src ?? k]!.text.trim();
-      if (v.isNotEmpty) params[k] = v;
+      if (v.isEmpty) {
+        params.remove(k);
+      } else {
+        params[k] = v;
+      }
     }
 
-    put('id');
+    final hy = proto.isHysteria;
+    if (proto != Proto.socks4) put('id');
+    if (_userPass || proto == Proto.socks4) put('user');
     if (proto == Proto.ssh) {
-      put('user');
-      put('privateKey');
       put('passphrase');
-      params['transport'] = transport;
-      if (transport != 'direct') put('sni');
-      if (transport == 'http') {
-        put('proxyHost');
-        put('proxyPort');
-        put('payload');
-        put('responseRewrite');
+      put('hostKey');
+      // Keep multi-line keys intact.
+      final key = t['privateKey']!.text;
+      if (key.trim().isEmpty) {
+        params.remove('privateKey');
+      } else {
+        params['privateKey'] = key;
       }
-      // keep multi-line keys intact
-      if (t['privateKey']!.text.trim().isNotEmpty) params['privateKey'] = t['privateKey']!.text;
-    } else {
+    }
+    if (proto == Proto.vmess) put('aid');
+    if (proto == Proto.shadowsocks) put('method');
+
+    var tls = hy || proto == Proto.https;
+    if (_hasTransport) {
       params['net'] = net;
       params['security'] = sec;
-      for (final k in ['sni', 'fp', 'path', 'flow', 'pbk', 'sid', 'serviceName', 'method', 'aid']) {
-        put(k);
+      tls = sec == 'tls';
+      if (sec != 'none') {
+        put('sni');
+        put('fp');
       }
-      put('host', 'hostHdr');
+      if (sec == 'tls') put('alpn');
+      if (sec == 'reality') {
+        put('pbk');
+        put('sid');
+      }
+      if (net == 'ws' || net == 'xhttp' || net == 'httpupgrade' || net == 'h2') {
+        put('path');
+        put('host', 'hostHdr');
+      }
+      if (net == 'grpc') put('serviceName');
+      if (proto == Proto.vless) put('flow');
+      if (proto == Proto.ssh) {
+        put('payload');
+        put('payloadHost');
+        put('proxy');
+        put('responseMap');
+        if (sec == 'tls' && t['payload']!.text.trim().isNotEmpty) {
+          params['payloadStage'] = stage;
+        } else {
+          params.remove('payloadStage');
+        }
+      }
     }
+    if (hy) {
+      put('sni');
+      put('obfs');
+      put('downMbps');
+      if (proto == Proto.hysteria2) put('pin');
+      if (proto == Proto.hysteria1) {
+        put('alpn');
+        put('upMbps');
+      }
+    }
+    if (proto == Proto.https) put('sni');
+    if (tls && insecure) {
+      params['allowInsecure'] = '1';
+    } else {
+      params.remove('allowInsecure');
+    }
+
     final c = ServerConfig(
       id: widget.existing?.id ?? ServerConfig.newId(),
       name: t['name']!.text.trim().isEmpty ? host : t['name']!.text.trim(),
@@ -421,48 +511,71 @@ class _EditorState extends State<_Editor> {
   Widget build(BuildContext context) {
     final p = context.pal;
     final ssh = proto == Proto.ssh;
+    final hy = proto.isHysteria;
+    final nets = ssh ? const ['tcp', 'ws'] : const ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade', 'h2'];
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 24), shrinkWrap: true, children: [
         Text(widget.existing == null ? 'New server' : 'Edit server', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
         const SizedBox(height: 14),
-        _chips('Protocol', [for (final x in Proto.values) x.label], proto.label, (v) => proto = Proto.values.firstWhere((e) => e.label == v)),
+        _chips('Protocol', [for (final x in Proto.values) x.label], proto.label, (v) {
+          final old = _defaultPort;
+          proto = Proto.values.firstWhere((e) => e.label == v);
+          // Follow the usual port while it is still the default of the previous protocol.
+          if (widget.existing == null && t['port']!.text.trim() == '$old') t['port']!.text = '$_defaultPort';
+          if (ssh != (proto == Proto.ssh) && !nets.contains(net)) net = 'tcp';
+        }),
         _f('name', 'Name'),
         _f('host', 'Host'),
         _f('port', 'Port', type: TextInputType.number),
+        if (_userPass || proto == Proto.socks4) _f('user', proto == Proto.socks4 ? 'User ID (optional)' : 'Username'),
         if (ssh) ...[
-          _f('user', 'Username'),
           _f('id', 'Password', obscure: true),
           _f('privateKey', 'Private key (PEM, optional)', lines: 4),
           _f('passphrase', 'Key passphrase', obscure: true),
-          _chips('Transport', const ['direct', 'tls', 'http'], transport, (v) => transport = v),
-          if (transport == 'tls') _f('sni', 'SNI (blank = server host)'),
-          if (transport == 'http') ...[
-            _f('proxyHost', 'HTTP proxy host (blank = server host)'),
-            _f('proxyPort', 'HTTP proxy port', type: TextInputType.number),
+          _note('Encrypted keys are not supported by the tunnel library yet. Use an unencrypted key.'),
+          _f('hostKey', 'Pinned host key (optional)', hint: 'SHA256:…'),
+          _note('Leave empty to trust the key on first use and refuse a changed one. A pinned key is checked on every connection.'),
+        ] else if (proto == Proto.vless || proto == Proto.vmess)
+          _f('id', 'UUID')
+        else if (proto != Proto.socks4 && !_userPass)
+          _f('id', hy ? 'Auth password' : 'Password'),
+        if (_userPass && !ssh) _f('id', 'Password', obscure: true),
+        if (proto == Proto.shadowsocks) _f('method', 'Cipher (e.g. aes-256-gcm)'),
+        if (proto == Proto.vmess) _f('aid', 'Alter ID'),
+        if (_hasTransport) ...[
+          _chips('Transport', nets, net, (v) => net = v),
+          _chips('Security', ssh ? const ['none', 'tls'] : const ['none', 'tls', 'reality'], sec, (v) => sec = v),
+          if (sec != 'none') _f('sni', 'SNI (blank = server host)'),
+          if (sec != 'none') _f('fp', 'Fingerprint (chrome, firefox…)'),
+          if (sec == 'tls') _f('alpn', 'ALPN (comma separated, optional)'),
+          if (sec == 'tls') _insecureSwitch(),
+          if (sec == 'reality') ...[_f('pbk', 'Reality public key'), _f('sid', 'Reality short ID')],
+          if (net == 'ws' || net == 'xhttp' || net == 'httpupgrade' || net == 'h2') ...[_f('path', 'Path'), _f('hostHdr', 'Host header')],
+          if (net == 'grpc') _f('serviceName', 'gRPC service name'),
+          if (proto == Proto.vless) _f('flow', 'Flow (xtls-rprx-vision)'),
+          if (ssh) ...[
+            const SizedBox(height: 4),
+            Text('HTTP payload (optional)', style: TextStyle(color: p.dim, fontWeight: FontWeight.w700, fontSize: 12.5)),
+            const SizedBox(height: 8),
             _f('payload', 'Payload', lines: 3),
-            _f('responseRewrite', 'Bootstrap response override (e.g. 302=200)'),
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Text('Supports HTTP Injector / HTTP Custom-style request payloads. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a;b] [ua] [sni=name] [tls] [plain]. Empty payload uses HTTP CONNECT. A successful CONNECT response establishes the tunnel. HTTP 101 Switching Protocols is accepted only when its Upgrade protocol matches the payload; WebSocket handshakes are verified and WebSocket frames are handled. HTTP redirects are rejected by default. The optional bootstrap response override (for example 302=200) applies only to the final SSH bootstrap response when it has exactly Content-Length: 0, no Transfer-Encoding, and a persistent connection. SSH transport validation still follows. This does not rewrite normal browsing responses or strip response headers. Proxy ports 443, 8443, 2053, 2083, 2087 and 2096 use TLS automatically.', style: TextStyle(color: context.pal.dim, fontSize: 12, height: 1.4)),
-            ),
-          ],
-          Text('The first connection trusts the server host key and remembers it. A changed key is refused.', style: TextStyle(color: p.dim, fontSize: 12.5)),
-        ] else ...[
-          _f('id', proto == Proto.vless || proto == Proto.vmess ? 'UUID' : 'Password'),
-          if (proto == Proto.shadowsocks) _f('method', 'Cipher (e.g. aes-256-gcm)'),
-          if (proto == Proto.vmess) _f('aid', 'Alter ID'),
-          if (proto != Proto.shadowsocks) ...[
-            _chips('Transport', const ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], net, (v) => net = v),
-            _chips('Security', const ['none', 'tls', 'reality'], sec, (v) => sec = v),
-            if (sec != 'none') _f('sni', 'SNI'),
-            if (sec != 'none') _f('fp', 'Fingerprint (chrome, firefox…)'),
-            if (sec == 'reality') ...[_f('pbk', 'Reality public key'), _f('sid', 'Reality short ID')],
-            if (net == 'ws' || net == 'xhttp' || net == 'httpupgrade') ...[_f('path', 'Path'), _f('hostHdr', 'Host header')],
-            if (net == 'grpc') _f('serviceName', 'gRPC service name'),
-            if (proto == Proto.vless) _f('flow', 'Flow (xtls-rprx-vision)'),
+            _f('payloadHost', 'Payload host (blank = server host)'),
+            _f('proxy', 'HTTP proxy to send it through (host:port, optional)'),
+            _f('responseMap', 'Response override (e.g. 302=200, 3xx=200)'),
+            if (sec == 'tls') _chips('Send payload', const ['pre-tls', 'post-tls'], stage, (v) => stage = v),
+            _note('HTTP Injector style payloads. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a|b] [ua]. Old [sni=…] and [rotate=a;b] spellings are converted, and [tls] / [plain] are replaced by the Security setting. Empty payload uses plain SSH. A successful reply, or 101 Switching Protocols with a matching Upgrade, establishes the tunnel.'),
           ],
         ],
+        if (hy) ...[
+          _f('sni', 'SNI (blank = server host)'),
+          _insecureSwitch(),
+          _f('obfs', 'Obfuscation password (optional)'),
+          if (proto == Proto.hysteria2) _f('pin', 'Pinned certificate SHA-256 (optional)'),
+          if (proto == Proto.hysteria1) _f('alpn', 'ALPN (optional)'),
+          if (proto == Proto.hysteria1) _f('upMbps', 'Upload limit, Mbps (optional)', type: TextInputType.number),
+          _f('downMbps', 'Download limit, Mbps (optional)', type: TextInputType.number),
+        ],
+        if (proto == Proto.https) ...[_f('sni', 'SNI (blank = server host)'), _insecureSwitch()],
         const SizedBox(height: 8),
         FilledButton(
           onPressed: _save,
