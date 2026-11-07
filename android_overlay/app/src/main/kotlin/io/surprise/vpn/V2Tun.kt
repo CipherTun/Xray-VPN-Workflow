@@ -26,6 +26,16 @@ object V2Tun {
     @Synchronized
     fun attach(s: VpnService) {
         svc = s
+        installProtector()
+    }
+
+    /**
+     * Installs the socket protector. Needed before anything that opens a connection while no VPN service is
+     * attached (latency tests, host key probes), because the Go side keeps one global protector and would
+     * otherwise have none.
+     */
+    @Synchronized
+    fun installProtector() {
         if (!installed) {
             Mobile.setProtector(protector)
             installed = true
@@ -95,6 +105,15 @@ object V2Tun {
 
     /** Latency in ms through the given config. Throws on failure. */
     fun ping(configJson: String, url: String): Long = Mobile.ping(configJson, url)
+
+    /**
+     * Connects to the SSH server in the config (through its payload / TLS / WebSocket chain), does the key
+     * exchange and returns the host key fingerprint ("SHA256:...") without logging in. Throws on failure.
+     */
+    fun probeHostKey(configJson: String, timeoutSec: Int): String {
+        installProtector()
+        return Mobile.probeHostKey(configJson, timeoutSec.toLong())
+    }
 
     /** Checks a payload template. Returns an error text or null when it compiles. */
     fun validatePayload(template: String): String? = try {
