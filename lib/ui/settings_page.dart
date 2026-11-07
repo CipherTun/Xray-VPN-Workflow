@@ -6,12 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:provider/provider.dart';
 
-import 'package:path_provider/path_provider.dart';
-
 import '../core/accents.dart';
 import '../core/models.dart';
-import '../core/ssh_tunnel.dart';
-import '../core/xray_config.dart';
+import '../core/route_lists.dart';
+import '../core/v2tun_config.dart';
 import '../state/app_state.dart';
 import 'import_page.dart';
 import 'share_page.dart';
@@ -44,13 +42,13 @@ class _SettingsPageState extends State<SettingsPage> {
     final p = context.pal;
     final set = s.settings;
     final rules = set.get<String>('customRules').split('\n').where((l) => l.trim().isNotEmpty && !l.trim().startsWith('#')).length;
+    final backups = set.get<String>('failoverMode') == 'ordered' ? set.list('failoverIds').length : 0;
     final cats = <_Cat>[
       _Cat(Icons.palette_rounded, 'Appearance', 'Theme, accent colours, glass blur', 'theme dark light accent colour color blur haptic', () => const _AppearancePage()),
-      _Cat(Icons.vpn_lock_rounded, 'Connection', 'Kill switch, reconnect, per-app VPN, timers', 'kill switch reconnect auto connect ipv6 mtu per app split sleep timer smart fastest', () => const _ConnectionPage()),
-      _Cat(Icons.alt_route_rounded, 'Routing & rules', '$rules custom rule${rules == 1 ? '' : 's'} · ${set.get<String>('routing') == 'global' ? 'everything proxied' : 'smart bypass'}', 'routing rules domain geosite geoip bypass lan china iran russia block ads quic bittorrent geo files', () => const _RoutingPage()),
-      _Cat(Icons.dns_rounded, 'DNS', '${set.get<String>('dnsPreset')}${set.get<bool>('dnsDoh') ? ' · DoH' : ''}${set.get<bool>('fakeDns') ? ' · FakeDNS' : ''}', 'dns doh fake hosts resolver cloudflare google quad9 adguard', () => const _DnsPage()),
-      _Cat(Icons.bolt_rounded, 'Xray / V2Ray core', 'Mux, fragment, sockopt, failover, chain, JSON', 'xray v2ray core mux xudp fragment sniffing tcp fast open fingerprint utls failover balancer chain double hop json lan share port', () => const _XrayPage()),
-      _Cat(Icons.terminal_rounded, 'SSH', 'Keep-alive, host keys, jump host, transports', 'ssh keepalive host key jump proxy tls sni payload cipher', () => const _SshPage()),
+      _Cat(Icons.vpn_lock_rounded, 'Connection', 'Kill switch, reconnect, per-app VPN, timers', 'kill switch reconnect auto connect ipv6 mtu per app split sleep timer smart fastest timeout', () => const _ConnectionPage()),
+      _Cat(Icons.alt_route_rounded, 'Routing & rules', '$rules custom rule${rules == 1 ? '' : 's'} · ${set.get<String>('routing') == 'global' ? 'everything proxied' : 'smart bypass'}', 'routing rules domain geosite geoip bypass lan china iran russia block ads quic bittorrent lists country', () => const _RoutingPage()),
+      _Cat(Icons.dns_rounded, 'DNS', '${set.get<String>('dnsPreset')}${set.get<bool>('fakeDns') ? ' · FakeDNS' : ''}', 'dns fake resolver cloudflare google quad9 adguard direct', () => const _DnsPage()),
+      _Cat(Icons.bolt_rounded, 'Tunnel core', backups > 0 ? 'Failover to $backups backup server${backups == 1 ? '' : 's'}' : 'Sniffing, mux, fragment, failover, UDP gateway', 'tunnel core v2tun mux fragment sniffing fingerprint utls failover backup udpgw badvpn insecure tls timeout ssh', () => const _TunnelPage()),
       _Cat(Icons.android_rounded, 'Android', 'Wake lock, battery, notification, network', 'android wake lock battery boot notification bypass underlying lan always on data saver diagnostics', () => const _AndroidPage()),
       _Cat(Icons.shield_rounded, 'Security & privacy', 'App PIN, screenshots, logs', 'security privacy pin lock screenshot secure logs wipe', () => const _SecurityPage()),
       _Cat(Icons.storage_rounded, 'Data & backup', 'Usage caps, subscriptions, settings backup', 'data usage cap subscription backup restore export import', () => const _DataPage()),
@@ -325,25 +323,31 @@ class _ValueRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     final p = context.pal;
-    final v = s.settings.get<dynamic>(k).toString();
+    final raw = s.settings.get<dynamic>(k).toString();
+    final v = raw.isEmpty ? 'Off' : raw;
     return _Row(
       title: title,
       trailing: Text(v, style: TextStyle(color: p.accent, fontWeight: FontWeight.w800)),
       onTap: () async {
-        final ctl = TextEditingController(text: v);
+        final ctl = TextEditingController(text: raw);
         final r = await showDialog<String>(
           context: context,
           builder: (c) => AlertDialog(
             title: Text(title),
-            content: TextField(controller: ctl, autofocus: true, keyboardType: number ? TextInputType.number : TextInputType.text),
-            actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(c, ctl.text.trim()), child: const Text('Save'))],
+            content: TextField(controller: ctl, autofocus: true, autocorrect: false, keyboardType: number ? TextInputType.number : TextInputType.text),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
+              // Text values (a gateway address, a custom DNS) may legitimately be empty.
+              if (!number) TextButton(onPressed: () => Navigator.pop(c, ''), child: const Text('Clear')),
+              FilledButton(onPressed: () => Navigator.pop(c, ctl.text.trim()), child: const Text('Save')),
+            ],
           ),
         );
-        if (r == null || r.isEmpty) return;
+        if (r == null) return;
         if (number) {
           final n = int.tryParse(r);
-          // Zero is a real value for caps, keep-alive and "automatic" ports; ports and sizes must stay positive.
-          const zeroOk = {'dailyCapMb', 'monthlyCapMb', 'tcpKeepAlive', 'sshLocalPort'};
+          // Zero is a real value for the caps; ports, sizes and timeouts must stay positive.
+          const zeroOk = {'dailyCapMb', 'monthlyCapMb'};
           if (n != null && (n > 0 || (n == 0 && zeroOk.contains(k)))) s.setSetting(k, n);
         } else {
           s.setSetting(k, r);
