@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/link_parser.dart';
-import '../core/xray_config.dart';
 import '../state/app_state.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -177,8 +176,9 @@ class _LatencyCardState extends State<_LatencyCard> {
     final lines = <String>[];
     final sel = s.selected;
     if (sel != null) {
+      // A request through the library with this profile, so it also proves the credentials work.
       await s.pingOne(sel);
-      lines.add('Server (TCP): ${sel.pingMs! < 0 ? 'timeout' : '${sel.pingMs} ms'}');
+      lines.add('Server (full request): ${sel.pingMs! < 0 ? 'failed' : '${sel.pingMs} ms'}');
     }
     final c = s.tunnelClient();
     try {
@@ -275,12 +275,16 @@ class _ExportCard extends StatelessWidget {
           Clipboard.setData(ClipboardData(text: l));
           toast(context, 'Link copied');
         }),
-        _btn(context, 'Copy Xray JSON', () {
+        _btn(context, 'Copy V2-TUN JSON', () {
           final c = s.selected;
           if (c == null) { toast(context, 'Select a server first.'); return; }
           if (c.locked) { toast(context, 'Locked configs cannot be exported.'); return; }
-          Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(buildXrayConfig(c, s.settings, sshSocksPort: s.settings.get<int>('socksPort') + 2))));
-          toast(context, 'Config copied');
+          try {
+            Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(s.configFor(c))));
+            toast(context, 'Config copied');
+          } catch (e) {
+            toast(context, '$e');
+          }
         }),
       ]),
     );
