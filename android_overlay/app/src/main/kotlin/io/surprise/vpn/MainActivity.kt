@@ -149,6 +149,46 @@ class MainActivity : FlutterFragmentActivity() {
                     background(result, "preview") { V2Tun.previewPayload(tpl, host, port) }
                 }
                 "payloadPresets" -> result.success(V2Tun.payloadPresets())
+                // Whole-config check without connecting: null when valid, otherwise the reason.
+                "validate" -> {
+                    val cfg = call.argument<String>("config")
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "validate") { V2Tun.validate(cfg) }
+                }
+                // What the config's payload sends and how the reply is checked.
+                "payloadPreview" -> {
+                    val cfg = call.argument<String>("config")
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "preview") { V2Tun.payloadPreview(cfg) }
+                }
+                // Download speed through a config (its own connection, so it works with or without the VPN).
+                "speedTest" -> {
+                    val cfg = call.argument<String>("config")
+                    val url = call.argument<String>("url") ?: ""
+                    val seconds = call.argument<Int>("seconds") ?: 10
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "speed") { V2Tun.speedTest(cfg, url, seconds) }
+                }
+                // Bug-host / SNI / server scan: one try of the config per candidate value.
+                "scanHosts" -> {
+                    val cfg = call.argument<String>("config")
+                    val field = call.argument<String>("field") ?: "payload.host"
+                    val values = call.argument<String>("values") ?: ""
+                    val target = call.argument<String>("target") ?: ""
+                    val jobs = call.argument<Int>("concurrency") ?: 3
+                    val seconds = call.argument<Int>("seconds") ?: 15
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "scan") { V2Tun.scanHosts(cfg, field, values, target, jobs, seconds) }
+                }
+                // Dial host:port through a config and close again.
+                "probe" -> {
+                    val cfg = call.argument<String>("config")
+                    val target = call.argument<String>("target") ?: ""
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "probe") { V2Tun.probe(cfg, target); true }
+                }
+                // 0 = main config, 1.. = backup in use, -1 = nothing running.
+                "activeOutbound" -> result.success(V2Tun.activeOutbound())
                 // How the running tunnel routes a connection: {"action":"direct","rule":"..."}.
                 "explainRoute" -> {
                     val net = call.argument<String>("network") ?: "tcp"
