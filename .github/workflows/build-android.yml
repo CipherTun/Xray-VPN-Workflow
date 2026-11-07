@@ -9,7 +9,7 @@ on:
         options: [release, debug]
         default: release
   push:
-    branches: [main]
+    branches: [main, "integrate/**"]
     paths-ignore: ["**.md", "assets/icon/preview.png"]
     tags: ["v*"]
 
@@ -19,12 +19,6 @@ permissions:
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  CORE_REPO: 2dust/AndroidLibXrayLite   # Xray-core library used by v2rayNG
-  CORE_REF: 2ffe5f794a32ba15b122e177b5acffc6f11c4959  # pinned AndroidLibXrayLite source
-  XRAY_CORE_REPO: XTLS/Xray-core
-  XRAY_CORE_COMMIT: a4a3dff5b20c2faae567b742c172c7b95e75c083  # Xray 26.10.31
 
 jobs:
   android:
@@ -40,11 +34,14 @@ jobs:
           if [ -f xray_vpn.zip ]; then
             rm -rf _src && mkdir _src && unzip -q xray_vpn.zip -d _src
             P="$(find _src -maxdepth 3 -name pubspec.yaml | head -1)"
-            [ -n "$P" ] && cp -R "$(dirname "$P")"/. . 
+            [ -n "$P" ] && cp -R "$(dirname "$P")"/. .
             rm -rf _src
           fi
           test -f pubspec.yaml || { echo "::error::pubspec.yaml not found. Upload xray_vpn.zip to the repository root."; exit 1; }
           ls
+
+      - name: Load pinned versions
+        run: grep -E '^[A-Z0-9_]+=' scripts/versions.env >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v5
         with:
@@ -62,27 +59,33 @@ jobs:
           channel: stable
           cache: true
 
-      # ── Xray core: libv2ray.aar from AndroidLibXrayLite (the library behind v2rayNG) ──
-      - name: Find the latest core release
-        id: core
-        run: |
-          tag="$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" "https://api.github.com/repos/${CORE_REPO}/releases/latest" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("tag_name",""))' || true)"
-          [ -n "$tag" ] || tag="week-$(date +%G-%V)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Core release: $tag"
+      # ── Tunnel library: V2-TUN -> v2tun.aar (gomobile) ──
+      # If the library repository is private, add a repo secret V2TUN_TOKEN
+      # (a token with read access to it).
+      - name: Check out V2-TUN
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.V2TUN_REPO }}
+          ref: ${{ env.V2TUN_REF }}
+          path: v2-tun
+          token: ${{ secrets.V2TUN_TOKEN || github.token }}
 
-      - name: Cache libv2ray.aar
+      - name: Resolve the library commit
+        id: lib
+        run: echo "sha=$(git -C v2-tun rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache v2tun.aar
         id: aar
         uses: actions/cache@v5
         with:
           path: android-libs
-          key: libv2ray-legacy-transport-patch-${{ steps.core.outputs.tag }}-${{ env.CORE_REF }}-v2
+          key: v2tun-aar-${{ steps.lib.outputs.sha }}-${{ hashFiles('scripts/build_core.sh') }}
 
-      - name: Get libv2ray.aar (prebuilt, or build from source)
+      - name: Build v2tun.aar
         if: steps.aar.outputs.cache-hit != 'true'
-        run: bash ./scripts/ci_fetch_core.sh
+        run: V2TUN_DIR="$PWD/v2-tun" bash ./scripts/build_core.sh
 
-      # ── Project scaffolding, icons, geo files ──
+      # ── Project scaffolding, icons ──
       - name: Prepare Flutter project
         run: bash ./scripts/ci_prepare.sh
 
