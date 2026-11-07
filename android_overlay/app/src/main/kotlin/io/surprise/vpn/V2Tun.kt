@@ -139,4 +139,40 @@ object V2Tun {
     } catch (t: Throwable) {
         t.message ?: "routing update failed"
     }
+
+    // ───────── checks that build their own client (work with or without a running tunnel) ─────────
+
+    /** Checks a whole config without connecting. Returns the reason it is invalid, or null when it is fine. */
+    fun validate(configJson: String): String? = try {
+        Mobile.validate(configJson).takeIf { it.isNotEmpty() }
+    } catch (t: Throwable) {
+        t.message ?: "invalid config"
+    }
+
+    /** What the config's payload would send and how the reply is checked, without connecting. Throws when invalid. */
+    fun payloadPreview(configJson: String): String = Mobile.payloadPreview(configJson)
+
+    /** Downloads [url] (empty: the library's default) through the config for up to [seconds]. Returns {"bytes":..,"bps":..}. */
+    fun speedTest(configJson: String, url: String, seconds: Int): String {
+        installProtector()
+        return Mobile.speedTest(configJson, url, seconds.toLong())
+    }
+
+    /**
+     * Tries the config once per line of [values] with that value in [field] (server, tls.sni, ws.host,
+     * payload.host or payload.proxy). Returns a JSON array of {"value","ok","ms","error"}.
+     */
+    fun scanHosts(configJson: String, field: String, values: String, target: String, concurrency: Int, seconds: Int): String {
+        installProtector()
+        return Mobile.scanHosts(configJson, field, values, target, concurrency.toLong(), seconds.toLong())
+    }
+
+    /** Dials [target] (host:port) through the config and closes. Throws when it cannot connect. */
+    fun probe(configJson: String, target: String) {
+        installProtector()
+        Mobile.probe(configJson, target)
+    }
+
+    /** Which config the running tunnel uses: 0 main, 1 first backup, ... and -1 when nothing is running. */
+    fun activeOutbound(): Int = try { Mobile.activeOutbound().toInt() } catch (_: Throwable) { -1 }
 }
