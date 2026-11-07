@@ -10,21 +10,21 @@ LIB="${V2TUN_DIR:-$ROOT/v2-tun}"
 export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
 [ -n "$ANDROID_NDK_HOME" ] || { echo "::error::ANDROID_NDK_HOME is not set"; exit 1; }
 
-go install golang.org/x/mobile/cmd/gomobile@latest
-go install golang.org/x/mobile/cmd/gobind@latest
-export PATH="$PATH:$(go env GOPATH)/bin"
-
 cd "$LIB"
 # gvisor is not pinned in go.mod (see its README); gomobile bind needs x/mobile/bind in the module.
 go get gvisor.dev/gvisor@go
 go get golang.org/x/mobile/bind@latest
+# Go 1.24+: gomobile/gobind must be declared as tool dependencies in go.mod, otherwise
+# `gomobile bind` fails with "missing golang.org/x/mobile dependency". Run them via `go tool`.
+go get -tool golang.org/x/mobile/cmd/gomobile@latest
+go get -tool golang.org/x/mobile/cmd/gobind@latest
 go mod tidy
 go build ./...
 go vet ./...
 
-gomobile init
+go tool gomobile init
 mkdir -p "$ROOT/android-libs"
-gomobile bind -target=android/arm64,android/arm,android/amd64 -androidapi 24 \
+go tool gomobile bind -target=android/arm64,android/arm,android/amd64 -androidapi 24 \
   -javapkg=io.surprise -ldflags="-s -w" \
   -o "$ROOT/android-libs/v2tun.aar" io.surprise.vpn/mobile
 ls -la "$ROOT/android-libs"
