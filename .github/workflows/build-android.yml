@@ -43,23 +43,8 @@ jobs:
       - name: Load pinned versions
         run: grep -E '^[A-Z0-9_]+=' scripts/versions.env >> "$GITHUB_ENV"
 
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-          cache: false
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
       # ── Tunnel library: V2-TUN -> v2tun.aar (gomobile) ──
+      # Checked out first so setup-go can key its dependency cache on the library's go.sum.
       # If the library repository is private, add a repo secret V2TUN_TOKEN
       # (a token with read access to it).
       - name: Check out V2-TUN
@@ -70,20 +55,42 @@ jobs:
           path: v2-tun
           token: ${{ secrets.V2TUN_TOKEN || github.token }}
 
-      - name: Resolve the library commit
-        id: lib
-        run: echo "sha=$(git -C v2-tun rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - name: Cache v2tun.aar
-        id: aar
+      # Caches only downloaded Go modules and Go's build cache. The build cache is
+      # content-addressed, so any change to the library source is always recompiled.
+      # The built v2tun.aar itself is NEVER cached.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: v2-tun/go.sum
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Gradle downloads/wrapper only (no project outputs, no aar).
+      - name: Cache Gradle
         uses: actions/cache@v5
         with:
-          path: android-libs
-          key: v2tun-aar-${{ steps.lib.outputs.sha }}-${{ hashFiles('scripts/build_core.sh') }}
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('pubspec.yaml', 'scripts/versions.env') }}
+          restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build v2tun.aar
-        if: steps.aar.outputs.cache-hit != 'true'
-        run: V2TUN_DIR="$PWD/v2-tun" bash ./scripts/build_core.sh
+      - name: Build v2tun.aar (always fresh)
+        run: |
+          rm -rf android-libs
+          echo "V2-TUN commit: $(git -C v2-tun rev-parse HEAD)"
+          V2TUN_DIR="$PWD/v2-tun" bash ./scripts/build_core.sh
+          test -s android-libs/v2tun.aar || { echo "::error::v2tun.aar was not produced"; exit 1; }
 
       # ── Project scaffolding, icons ──
       - name: Prepare Flutter project
@@ -135,11 +142,6 @@ jobs:
           EOP
           sed -i 's/^ *//' android/key.properties
 
-      # ── Checks (never blocks the build, read the log if the app misbehaves) ──
-      - name: Analyze
-        continue-on-error: true
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
-
       # ── Build ──
       - name: Build release APKs
         if: inputs.build_type != 'debug'
@@ -173,3 +175,10 @@ jobs:
         with:
           files: dist/*.apk
           generate_release_notes: true
+
+      # Runs after the APKs are already uploaded, so it never delays them.
+      # Never blocks the build, read the log if the app misbehaves.
+      - name: Analyze
+        if: inputs.build_type != 'debug'
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
