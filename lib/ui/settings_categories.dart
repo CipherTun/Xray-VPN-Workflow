@@ -56,7 +56,7 @@ Future<void> _textDialog(
   if (r != null) s.setSetting(k, r);
 }
 
-/// Bottom sheet to pick servers. [multi] allows several; [where] filters the list.
+/// Bottom sheet to pick servers. [multi] allows several (kept in the order they were ticked); [where] filters the list.
 Future<void> _pickServers(
   BuildContext context, {
   required String title,
@@ -175,6 +175,7 @@ class _ConnectionPage extends StatelessWidget {
             _SwitchRow('Auto-reconnect', 'Retry up to 5 times when the connection drops', 'autoReconnect'),
             _SwitchRow('Connect on launch', null, 'autoConnect'),
             _SwitchRow('Smart connect', 'Test every server and pick the fastest on connect', 'smartConnect'),
+            _ValueRow('Server connect timeout (s)', 'connectTimeout', number: true),
             _IntChoiceRow('Auto-disconnect timer', 'sleepTimer', const {0: 'Off', 30: '30 min', 60: '1 h', 120: '2 h', 240: '4 h'}),
           ]),
           _Section('Network', [
@@ -211,7 +212,7 @@ class _RoutingPage extends StatelessWidget {
           ]),
           _Section('Blocking', [
             _SwitchRow('Block QUIC (UDP 443)', 'Forces browsers onto TCP, which proxies handle better', 'blockQuic'),
-            _SwitchRow('Block BitTorrent', 'Drops torrent traffic (useful on shared or limited servers)', 'blockBittorrent'),
+            _SwitchRow('Block BitTorrent', 'Drops torrent traffic. Needs traffic sniffing (Tunnel core).', 'blockBittorrent'),
           ]),
           _Section('Rules', [
             _Row(
@@ -221,10 +222,10 @@ class _RoutingPage extends StatelessWidget {
               onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _RulesEditorPage())),
             ),
             _Row(
-              title: 'Geo data files',
-              subtitle: 'geoip.dat and geosite.dat used by geo rules',
+              title: 'Route lists',
+              subtitle: 'Country IPs, China sites and the ad list used by geo rules',
               trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _GeoPage())),
+              onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _ListsPage())),
             ),
           ]),
         ];
@@ -265,7 +266,7 @@ class _RulesEditorState extends State<_RulesEditorPage> {
       'domain': 'Domain (and subdomains)',
       'full': 'Exact domain',
       'keyword': 'Keyword',
-      'geosite': 'Geosite list',
+      'geosite': 'Geosite list (cn, category-ads-all)',
       'ip': 'IP / CIDR',
       'geoip': 'Country IPs (geoip)',
       'port': 'Port or range',
@@ -361,7 +362,7 @@ class _RulesEditorState extends State<_RulesEditorPage> {
                   tooltip: 'Presets',
                   onSelected: (v) {
                     if (v == 'text') {
-                      _textDialog(context, k: 'customRules', title: 'Rules as text', help: 'One rule per line: proxy, direct or block, then selectors.\nExamples:\ndirect domain:bank.com full:login.example.com\nblock geosite:category-ads-all\nproxy geosite:netflix\ndirect ip:192.168.0.0/16 port:22', lines: 8).then((_) => setState(() => lines = context.read<AppState>().settings.get<String>('customRules').split('\n').where((l) => l.trim().isNotEmpty).toList()));
+                      _textDialog(context, k: 'customRules', title: 'Rules as text', help: 'One rule per line: proxy, direct or block, then selectors.\nExamples:\ndirect domain:bank.com full:login.example.com\nblock geosite:category-ads-all\ndirect geoip:cn geosite:cn\ndirect ip:192.168.0.0/16 port:22', lines: 8).then((_) => setState(() => lines = context.read<AppState>().settings.get<String>('customRules').split('\n').where((l) => l.trim().isNotEmpty).toList()));
                     } else {
                       _preset(v);
                     }
@@ -370,7 +371,7 @@ class _RulesEditorState extends State<_RulesEditorPage> {
                     PopupMenuItem(value: 'block geosite:category-ads-all', child: Text('Block ads')),
                     PopupMenuItem(value: 'block protocol:bittorrent', child: Text('Block BitTorrent')),
                     PopupMenuItem(value: 'direct domain:local domain:lan domain:localhost', child: Text('Local names direct')),
-                    PopupMenuItem(value: 'proxy geosite:netflix geosite:disney geosite:youtube', child: Text('Streaming via proxy')),
+                    PopupMenuItem(value: 'direct geoip:cn geosite:cn', child: Text('China direct')),
                     PopupMenuItem(value: 'direct port:22', child: Text('SSH port direct')),
                     PopupMenuDivider(),
                     PopupMenuItem(value: 'text', child: Text('Edit as text')),
@@ -444,16 +445,17 @@ class _RulesEditorState extends State<_RulesEditorPage> {
   }
 }
 
-class _GeoPage extends StatefulWidget {
-  const _GeoPage();
+/// The text lists behind geoip:XX / geosite:XX rules. The tunnel library bundles no country data, so the app
+/// downloads these files and the VPN service hands them to the library when it starts.
+class _ListsPage extends StatefulWidget {
+  const _ListsPage();
   @override
-  State<_GeoPage> createState() => _GeoState();
+  State<_ListsPage> createState() => _ListsState();
 }
 
-class _GeoState extends State<_GeoPage> {
-  static const files = ['geoip.dat', 'geosite.dat'];
+class _ListsState extends State<_ListsPage> {
   Map<String, String> info = {};
-  String? busy;
+  bool busy = false;
   String? error;
 
   @override
@@ -462,64 +464,52 @@ class _GeoState extends State<_GeoPage> {
     _scan();
   }
 
-  Future<Directory> _dir() => getApplicationSupportDirectory();
-
   Future<void> _scan() async {
-    final d = await _dir();
-    final m = <String, String>{};
-    for (final f in files) {
-      final file = File('${d.path}/$f');
-      m[f] = await file.exists() ? '${fmtBytes(await file.length())} · ${(await file.lastModified()).toString().substring(0, 10)}' : 'Not downloaded (built-in copy is used)';
-    }
+    final s = context.read<AppState>();
+    final m = await RouteLists.status(routeListSources(s.settings).keys);
     if (mounted) setState(() => info = m);
   }
 
-  Future<void> _download(String name) async {
+  Future<void> _refresh() async {
     final s = context.read<AppState>();
-    setState(() { busy = name; error = null; });
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    setState(() { busy = true; error = null; });
     try {
-      final d = await _dir();
-      final req = await client.getUrl(Uri.parse('${s.settings.get<String>('geoBase')}/$name'));
-      final res = await req.close();
-      if (res.statusCode != 200) throw 'HTTP ${res.statusCode}';
-      final tmp = File('${d.path}/$name.part');
-      final sink = tmp.openWrite();
-      await res.pipe(sink);
-      if (await tmp.length() < 10000) throw 'The download looks incomplete';
-      await tmp.rename('${d.path}/$name');
-      s.log('info', 'Updated $name');
+      await s.refreshRouteLists();
     } catch (e) {
-      error = 'Could not update $name: $e';
-    } finally {
-      client.close(force: true);
-      if (mounted) setState(() => busy = null);
-      _scan();
+      error = '$e';
     }
+    if (mounted) setState(() => busy = false);
+    _scan();
   }
 
   @override
   Widget build(BuildContext context) {
     final p = context.pal;
-    return _SubPage('Geo data files', (c) => [
-          _Section('Files', [
-            for (final f in files)
-              _Row(
-                title: f,
-                subtitle: info[f] ?? '…',
-                trailing: busy == f ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Icon(Icons.download_rounded, color: p.accent),
-                onTap: busy == null ? () => _download(f) : null,
-              ),
-          ]),
-          _Section('Source', [
-            _ValueRow('Download base URL', 'geoBase'),
-          ]),
-          if (error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(error!, style: TextStyle(color: p.bad))),
-          Padding(
-            padding: const EdgeInsets.only(top: 14),
-            child: Text('Geo files power rules like geosite:netflix, geoip:cn and the ad blocker. They are read the next time you connect. Default source: Loyalsoldier/v2ray-rules-dat.', style: TextStyle(color: p.dim, fontSize: 12.5, height: 1.4)),
-          ),
-        ]);
+    return _SubPage(
+      'Route lists',
+      (c) => [
+        _Section('In use by your routing', [
+          if (info.isEmpty) const _Row(title: 'None', subtitle: 'Your current routing needs no downloaded list.'),
+          for (final e in info.entries) _Row(title: e.key, subtitle: e.value),
+        ]),
+        _Section('Sources', [
+          _ValueRow('Ad domains URL', 'listAdsUrl'),
+          _ValueRow('China domains URL', 'listDirectUrl'),
+          _ValueRow('Country IP lists base URL', 'listIpBase'),
+          _ValueRow('Refresh every (days)', 'listRefreshDays', number: true),
+        ]),
+        if (error != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(error!, style: TextStyle(color: p.bad))),
+        Padding(
+          padding: const EdgeInsets.only(top: 14),
+          child: Text('Lists are plain text, one domain or CIDR per line. They are downloaded before the tunnel starts and applied on connect, so a change takes effect the next time you connect. Default source: Loyalsoldier.', style: TextStyle(color: p.dim, fontSize: 12.5, height: 1.4)),
+        ),
+      ],
+      actions: [
+        busy
+            ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))
+            : IconButton(onPressed: _refresh, icon: const Icon(Icons.refresh_rounded), tooltip: 'Download again'),
+      ],
+    );
   }
 }
 
@@ -534,216 +524,87 @@ class _DnsPage extends StatelessWidget {
         return [
           _Section('Resolver', [
             _ChoiceRow('Provider', 'dnsPreset', const {'cloudflare': 'Cloudflare', 'google': 'Google', 'quad9': 'Quad9', 'adguard': 'AdGuard', 'custom': 'Custom'}),
-            if (!custom) _SwitchRow('Encrypted DNS (DoH)', 'Ask the provider over HTTPS, through the tunnel', 'dnsDoh'),
-            if (custom) _ValueRow('Custom servers', 'dnsRemote'),
-            _ValueRow('Primary DNS (plain)', 'dns1'),
-            _ValueRow('Secondary DNS (plain)', 'dns2'),
+            if (custom) _ValueRow('Primary DNS', 'dns1'),
+            if (custom) _ValueRow('Secondary DNS', 'dns2'),
           ]),
           _Section('Behaviour', [
-            _ChoiceRow('Query strategy', 'dnsStrategy', const {'auto': 'Auto', 'UseIP': 'IPv4 + IPv6', 'UseIPv4': 'IPv4 only', 'UseIPv6': 'IPv6 only'}),
-            _SwitchRow('DNS cache', 'Remember answers for speed', 'dnsCache'),
-            _SwitchRow('FakeDNS', 'Answer instantly with placeholder IPs and resolve on the server side (faster, avoids DNS leaks)', 'fakeDns'),
-            const _TextRow('Static hosts', 'dnsHosts', help: 'One entry per line:\nexample.com 1.2.3.4\nrouter.lan 192.168.1.1', empty: 'Pin a domain to an IP'),
+            _SwitchRow('FakeDNS', 'Answer instantly with placeholder IPs and resolve on the server side (faster, avoids DNS leaks, makes domain rules work for every app)', 'fakeDns'),
+            _ValueRow('Direct resolver (host:port)', 'directDns'),
           ]),
           Padding(
             padding: const EdgeInsets.only(top: 14),
-            child: Text('Custom servers accept IPs, https://… (DoH), tcp://… and quic+local://…, separated by commas.', style: TextStyle(color: c.pal.dim, fontSize: 12.5, height: 1.4)),
+            child: Text('The provider answers the tunnel\'s DNS queries. The direct resolver looks up your server\'s own hostname and domains your rules send direct; it bypasses the VPN so it works before the tunnel is up.', style: TextStyle(color: c.pal.dim, fontSize: 12.5, height: 1.4)),
           ),
         ];
       });
 }
 
-// ───────── Xray core ─────────
+// ───────── Tunnel core ─────────
 
-class _XrayPage extends StatelessWidget {
-  const _XrayPage();
+class _TunnelPage extends StatelessWidget {
+  const _TunnelPage();
   @override
-  Widget build(BuildContext context) => _SubPage('Xray / V2Ray core', (c) {
+  Widget build(BuildContext context) => _SubPage('Tunnel core', (c) {
         final s = c.read<AppState>();
         final set = s.settings;
         final pool = set.list('failoverIds');
-        final chain = s.configs.where((x) => x.id == set.get<String>('chainId')).firstOrNull;
-        final lan = set.get<bool>('allowLan');
-        final port = set.get<int>('socksPort');
+        final ordered = set.get<String>('failoverMode') == 'ordered';
         return [
-          _Section('Logging', [
-            _ChoiceRow('Core log level', 'logLevel', const {'warning': 'Warning', 'info': 'Info', 'debug': 'Debug', 'none': 'Off'}),
-          ]),
           _Section('Sniffing', [
-            _SwitchRow('Traffic sniffing', 'Detect domains for smarter routing', 'sniffing'),
-            _SwitchRow('Route only', 'Use the sniffed domain for routing but keep the original destination', 'routeOnly'),
-            _ValueRow('Sniffed protocols', 'sniffOverride'),
+            _SwitchRow('Traffic sniffing', 'Read the domain or protocol from the first bytes so domain and protocol rules work', 'sniffing'),
           ]),
           _Section('Multiplexing', [
-            _SwitchRow('Mux', 'Share one connection between streams (not used with XTLS flows)', 'mux'),
+            _SwitchRow('Mux', 'Share one connection between streams (VLESS, VMess, Trojan, Shadowsocks; not with XTLS flows)', 'mux'),
             _ValueRow('Mux concurrency', 'muxConcurrency', number: true),
-            _ValueRow('XUDP concurrency', 'xudpConcurrency', number: true),
-            _ChoiceRow('XUDP for UDP 443', 'xudpProxyUDP443', const {'reject': 'Reject', 'allow': 'Allow', 'skip': 'Skip'}),
           ]),
           _Section('Anti-censorship', [
-            _SwitchRow('TLS fragmentation', 'Split the TLS hello to evade filtering', 'fragment'),
+            _SwitchRow('TLS fragmentation', 'Split the TLS hello to evade filtering (TLS and REALITY profiles)', 'fragment'),
             if (set.get<bool>('fragment')) ...[
-              _ValueRow('Fragment packets', 'fragPackets'),
               _ValueRow('Fragment length', 'fragLength'),
               _ValueRow('Fragment interval (ms)', 'fragInterval'),
             ],
             _ChoiceRow('TLS fingerprint (uTLS)', 'defaultFp', const {'': 'Per server', 'chrome': 'Chrome', 'firefox': 'Firefox', 'safari': 'Safari', 'ios': 'iOS', 'android': 'Android', 'edge': 'Edge', 'randomized': 'Randomized'}),
             _SwitchRow('Allow insecure TLS', 'Skips certificate checks. Only for servers you control', 'allowInsecure'),
           ]),
-          _Section('Socket tuning', [
-            _SwitchRow('TCP Fast Open', 'Saves a round trip on new connections where supported', 'tcpFastOpen'),
-            _SwitchRow('Multipath TCP', 'Use MPTCP when the server supports it', 'tcpMptcp'),
-            _ValueRow('TCP keep-alive idle (s, 0 = default)', 'tcpKeepAlive', number: true),
-            _ChoiceRow('Outbound DNS strategy', 'sockoptDomainStrategy', const {'AsIs': 'As is', 'UseIP': 'IPv4 + IPv6', 'UseIPv4': 'IPv4', 'UseIPv6': 'IPv6'}),
-            _ValueRow('Idle connection timeout (s)', 'connIdle', number: true),
+          _Section('UDP over TCP proxies', [
+            _ValueRow('BadVPN udpgw address', 'udpgw'),
+            const _Row(title: 'What this does', subtitle: 'SSH, SOCKS and HTTP proxies cannot carry UDP on their own. If the server runs badvpn-udpgw, enter its address as the server sees it (for example 127.0.0.1:7300) to tunnel UDP, DNS included.'),
           ]),
-          _Section('Failover & load balancing', [
-            _ChoiceRow('Strategy', 'failoverMode', const {'off': 'Off', 'leastPing': 'Lowest ping', 'random': 'Random', 'roundRobin': 'Round robin'}),
-            _Row(
-              title: 'Extra servers',
-              subtitle: pool.isEmpty ? 'The selected server is combined with these' : '${pool.length} selected',
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => _pickServers(c, title: 'Failover servers', multi: true, selected: pool.toSet(), where: (x) => x.proto != Proto.ssh && x.id != s.selectedId, onDone: (v) => s.setSetting('failoverIds', v.toList())),
-            ),
-            if (set.get<String>('failoverMode') == 'leastPing') _ValueRow('Health check every (s)', 'probeSeconds', number: true),
+          _Section('Failover', [
+            _ChoiceRow('Mode', 'failoverMode', const {'off': 'Off', 'ordered': 'Try backups in order'}),
+            if (ordered)
+              _Row(
+                title: 'Backup servers',
+                subtitle: pool.isEmpty ? 'Pick the servers to try, in the order you tick them' : '${pool.length} selected · tried in this order',
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => _pickServers(c, title: 'Backup servers (in order)', multi: true, selected: pool.toSet(), where: (x) => x.id != s.selectedId, onDone: (v) => s.setSetting('failoverIds', v.toList())),
+              ),
+            const _Row(title: 'How it works', subtitle: 'When the selected server cannot be reached within the connect timeout, the library moves to the next backup. Backups keep their own protocol and credentials; routing, DNS and UDP gateway settings come from this phone.'),
           ]),
-          _Section('Proxy chain (double hop)', [
-            _Row(
-              title: 'Entry server',
-              subtitle: chain == null ? 'Off. Traffic goes straight to the selected server.' : 'Via ${chain.safeHost == chain.host ? chain.name : 'locked server'}, then the selected server',
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => _pickServers(c, title: 'Entry server', multi: false, selected: {set.get<String>('chainId')}, where: (x) => x.proto != Proto.ssh && x.id != s.selectedId, onDone: (v) => s.setSetting('chainId', v.isEmpty ? '' : v.first)),
-            ),
-            if (set.get<bool>('fragment')) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 12), child: Text('Chaining is skipped while TLS fragmentation is on.', style: TextStyle(color: c.pal.warn, fontSize: 12.5))),
-          ]),
-          _Section('Local proxy', [
-            _ValueRow('SOCKS port', 'socksPort', number: true),
-            _SwitchRow('Share on local network', 'Let other devices on your Wi-Fi or hotspot use this tunnel (SOCKS ${port + 10}, HTTP ${port + 11})', 'allowLan'),
-            if (lan) ...[
-              _ValueRow('Username (optional)', 'localUser'),
-              _ValueRow('Password (optional)', 'localPass'),
-            ],
+          _Section('SSH profiles', [
+            const _Row(title: 'Host key pinning', subtitle: 'Set a host key fingerprint per SSH server in Configs → Edit. Without one the key is not verified.'),
+            const _Row(title: 'Key passphrases', subtitle: 'Not supported by the tunnel library. Use an unencrypted private key.'),
           ]),
           _Section('Advanced', [
-            const _TextRow('JSON override', 'xrayJson', json: true, empty: 'Merge your own Xray JSON over the generated config', help: 'Objects are merged, arrays are replaced. Example:\n{"log":{"loglevel":"debug"},"dns":{"disableFallback":true}}'),
             _Row(
               title: 'Copy generated config',
-              subtitle: 'Full Xray JSON for the selected server',
+              subtitle: 'V2-TUN JSON for the selected server',
               trailing: const Icon(Icons.copy_rounded, size: 19),
               onTap: () {
                 final sel = s.selected;
                 if (sel == null) return toast(c, 'Select a server first.');
                 if (sel.locked) return toast(c, 'Locked configs cannot be exported.');
-                final pool2 = [for (final id in pool) ...s.configs.where((x) => x.id == id && x.proto != Proto.ssh)];
-                final chain2 = s.configs.where((x) => x.id == set.get<String>('chainId')).firstOrNull;
-                Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(buildXrayConfig(sel, set, sshSocksPort: port + 2, pool: pool2, chain: chain2))));
-                toast(c, 'Config copied');
+                try {
+                  Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(s.configFor(sel))));
+                  toast(c, 'Config copied');
+                } catch (e) {
+                  toast(c, '$e');
+                }
               },
             ),
           ]),
         ];
       });
-}
-
-// ───────── SSH ─────────
-
-class _SshPage extends StatelessWidget {
-  const _SshPage();
-  @override
-  Widget build(BuildContext context) => _SubPage('SSH', (c) {
-        final s = c.read<AppState>();
-        final set = s.settings;
-        final jump = s.configs.where((x) => x.id == set.get<String>('sshJumpId')).firstOrNull;
-        return [
-          _Section('Session', [
-            _ValueRow('Keep-alive (seconds)', 'sshKeepAlive', number: true),
-            _ValueRow('Connect timeout (seconds)', 'sshConnectTimeout', number: true),
-            _SwitchRow('TCP no-delay', 'Lower latency for interactive traffic', 'sshNoDelay'),
-            _ValueRow('Local SOCKS port (0 = automatic)', 'sshLocalPort', number: true),
-            _ValueRow('Max simultaneous connections', 'sshMaxConnections', number: true),
-          ]),
-          _Section('Host keys', [
-            _ChoiceRow('Verification', 'sshHostKeyPolicy', const {'tofu': 'Trust on first use', 'strict': 'Approve manually', 'off': 'Do not verify'}),
-            _Row(title: 'Trusted hosts', subtitle: 'Review, approve or remove saved keys', trailing: const Icon(Icons.chevron_right_rounded), onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _TrustedHostsPage()))),
-            _Row(
-              title: 'Forget all host keys',
-              onTap: () {
-                s.ssh.forgetHostKeys(s.prefs);
-                toast(c, 'Host keys cleared');
-              },
-            ),
-          ]),
-          _Section('Jump host', [
-            _Row(
-              title: 'Connect through another SSH server',
-              subtitle: jump == null ? 'Off' : 'Via ${jump.safeHost == jump.host ? jump.name : 'locked server'}',
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => _pickServers(c, title: 'Jump host', multi: false, selected: {set.get<String>('sshJumpId')}, where: (x) => x.proto == Proto.ssh && x.id != s.selectedId, onDone: (v) => s.setSetting('sshJumpId', v.isEmpty ? '' : v.first)),
-            ),
-          ]),
-          const _Section('Compatibility', [
-            _Row(title: 'Supported algorithms', subtitle: 'Ciphers AES-128/192/256 CTR and CBC, key exchange curve25519 and ECDH, host keys Ed25519, ECDSA and RSA, MACs HMAC-SHA2/SHA1 (DartSSH2 4.1.0)'),
-            _Row(title: 'Transports', subtitle: 'Choose Direct, TLS with custom SNI, or HTTP payload per SSH server in Configs → Edit'),
-          ]),
-        ];
-      });
-}
-
-class _TrustedHostsPage extends StatefulWidget {
-  const _TrustedHostsPage();
-  @override
-  State<_TrustedHostsPage> createState() => _TrustedHostsState();
-}
-
-class _TrustedHostsState extends State<_TrustedHostsPage> {
-  @override
-  Widget build(BuildContext context) {
-    final s = context.read<AppState>();
-    final p = context.pal;
-    final trusted = SshTunnel.trusted(s.prefs);
-    final pending = SshTunnel.pending(s.prefs);
-    Widget tile(String id, String fp, {required bool isPending}) => Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Glass(
-            child: Row(children: [
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(id, style: const TextStyle(fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 2),
-                  Text(fp, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.dim, fontSize: 11.5, fontFamily: 'monospace')),
-                ]),
-              ),
-              if (isPending) IconButton(icon: Icon(Icons.check_circle_rounded, color: p.good), tooltip: 'Approve', onPressed: () => setState(() => SshTunnel.approve(s.prefs, id))),
-              IconButton(icon: Icon(Icons.delete_rounded, color: p.bad), tooltip: 'Remove', onPressed: () => setState(() => SshTunnel.forget(s.prefs, id))),
-            ]),
-          ),
-        );
-    return Scaffold(
-      body: Backdrop(
-        child: SafeArea(
-          child: Column(children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 14, 0),
-              child: Row(children: [
-                IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.arrow_back_rounded)),
-                const Text('Trusted hosts', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, letterSpacing: -.5)),
-              ]),
-            ),
-            Expanded(
-              child: (trusted.isEmpty && pending.isEmpty)
-                  ? const Center(child: EmptyState(icon: Icons.fingerprint_rounded, title: 'No saved keys', body: 'Keys appear here after you connect to an SSH server.'))
-                  : ListView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 40), children: [
-                      if (pending.isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text('Waiting for approval', style: TextStyle(color: p.warn, fontWeight: FontWeight.w800))),
-                      for (final e in pending.entries) tile(e.key, e.value, isPending: true),
-                      if (trusted.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8, bottom: 8), child: Text('Trusted', style: TextStyle(color: p.accent, fontWeight: FontWeight.w800))),
-                      for (final e in trusted.entries) tile(e.key, e.value, isPending: false),
-                    ]),
-            ),
-          ]),
-        ),
-      ),
-    );
-  }
 }
 
 // ───────── Android ─────────
@@ -774,7 +635,7 @@ class _AndroidPage extends StatelessWidget {
             _Row(title: 'Notification channel settings', trailing: const Icon(Icons.open_in_new_rounded, size: 19), onTap: () => guard(s.bridge.openNotificationSettings())),
           ]),
           _Section('Health', [
-            _Row(title: 'Diagnostics', subtitle: 'Check permissions, battery, network and ports', trailing: const Icon(Icons.chevron_right_rounded), onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _DiagnosticsPage()))),
+            _Row(title: 'Diagnostics', subtitle: 'Check permissions, battery, network and route lists', trailing: const Icon(Icons.chevron_right_rounded), onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const _DiagnosticsPage()))),
           ]),
         ];
       });
@@ -796,22 +657,11 @@ class _DiagnosticsState extends State<_DiagnosticsPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _run());
   }
 
-  Future<bool> _portFree(int port) async {
-    try {
-      final srv = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
-      await srv.close();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<void> _run() async {
     final s = context.read<AppState>();
     final d = await s.bridge.diagnostics();
-    final port = s.settings.get<int>('socksPort');
-    final dir = await getApplicationSupportDirectory();
-    final geo = await File('${dir.path}/geosite.dat').exists();
+    final lists = await RouteLists.status(routeListSources(s.settings).keys);
+    final missing = lists.entries.where((e) => e.value == 'Not downloaded').map((e) => e.key).toList();
     final r = <(String, String, bool?)>[
       ('Android', '${d['release'] ?? '?'} (API ${d['sdk'] ?? '?'})', null),
       ('Device', '${d['device'] ?? '?'} · ${d['abi'] ?? '?'}', null),
@@ -821,8 +671,7 @@ class _DiagnosticsState extends State<_DiagnosticsPage> {
       ('Data Saver', switch (d['dataSaver']) { 1 => 'Off', 2 => 'On, XRay allowed', 3 => 'On and XRay is restricted', _ => 'Unknown' }, d['dataSaver'] == null ? null : d['dataSaver'] != 3),
       ('Rooted', d['rooted'] == true ? 'Yes' : 'No', null),
       ('Tunnel service', d['running'] == true ? 'Running' : 'Stopped', null),
-      ('Local port $port', await _portFree(port) ? 'Free' : 'In use (normal while connected)', null),
-      ('Geo data', geo ? 'Downloaded copy present' : 'Built-in copy', null),
+      ('Route lists', lists.isEmpty ? 'None needed' : (missing.isEmpty ? '${lists.length} ready' : 'Missing: ${missing.join(', ')}. They download on the next connect.'), lists.isEmpty ? null : missing.isEmpty),
       ('Servers', '${s.configs.length} saved', s.configs.isNotEmpty),
     ];
     if (mounted) setState(() { rows = r; loading = false; });
@@ -890,14 +739,14 @@ class _SecurityPage extends StatelessWidget {
           _Section('Danger zone', [
             _Row(
               title: 'Erase all data',
-              subtitle: 'Servers, settings, usage, host keys and PIN. Cannot be undone.',
+              subtitle: 'Servers, settings, usage, route lists and PIN. Cannot be undone.',
               trailing: Icon(Icons.delete_forever_rounded, color: c.pal.bad),
               onTap: () async {
                 final ok = await showDialog<bool>(
                   context: c,
                   builder: (d) => AlertDialog(
                     title: const Text('Erase everything?'),
-                    content: const Text('All servers (including locked configs), settings, usage history and saved SSH host keys will be removed from this phone.'),
+                    content: const Text('All servers (including locked configs), settings, usage history and downloaded route lists will be removed from this phone.'),
                     actions: [TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Erase'))],
                   ),
                 );
@@ -981,8 +830,7 @@ class _AboutPage extends StatelessWidget {
           _Section('XRay VPN', [
             const _Row(title: 'Version', subtitle: 'io.surprise.vpn · 1.2.0'),
             _Row(title: 'Device ID', subtitle: s.deviceCode, trailing: const Icon(Icons.copy_rounded, size: 19), onTap: () { Clipboard.setData(ClipboardData(text: s.deviceCode)); toast(c, 'Device ID copied'); }),
-            const _Row(title: 'Xray-core', subtitle: 'v26.10.21'),
-            const _Row(title: 'DartSSH2', subtitle: '4.1.0'),
+            const _Row(title: 'Tunnel library', subtitle: 'V2-TUN (VLESS, VMess, Trojan, Shadowsocks, SSH, SOCKS, HTTP, Hysteria)'),
           ]),
           _Section('Maintenance', [
             _Row(title: 'Reset settings', subtitle: 'Servers are kept', onTap: () => _confirmReset(c)),
