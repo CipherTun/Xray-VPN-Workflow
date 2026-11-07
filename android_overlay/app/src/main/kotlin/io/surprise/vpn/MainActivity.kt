@@ -131,6 +131,31 @@ class MainActivity : FlutterFragmentActivity() {
                     if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
                     background(result, "ping") { V2Tun.ping(cfg, url) }
                 }
+                // SSH host key fingerprint ("SHA256:...") of the server in a v2tun config, without logging in.
+                "probeHostKey" -> {
+                    val cfg = call.argument<String>("config")
+                    val timeout = call.argument<Int>("timeoutSec") ?: 20
+                    if (cfg == null) { result.error("bad_args", "config missing", null); return@setMethodCallHandler }
+                    background(result, "hostkey") { V2Tun.probeHostKey(cfg, timeout) }
+                }
+                // Payload helpers of the library: validate (error text or null), preview, built-in presets.
+                "validatePayload" -> result.success(V2Tun.validatePayload(call.argument<String>("template") ?: ""))
+                "previewPayload" -> {
+                    val tpl = call.argument<String>("template") ?: ""
+                    val host = call.argument<String>("host") ?: "example.com"
+                    val port = call.argument<Int>("port") ?: 22
+                    background(result, "preview") { V2Tun.previewPayload(tpl, host, port) }
+                }
+                "payloadPresets" -> result.success(V2Tun.payloadPresets())
+                // How the running tunnel routes a connection: {"action":"direct","rule":"..."}.
+                "explainRoute" -> {
+                    val net = call.argument<String>("network") ?: "tcp"
+                    val addr = call.argument<String>("addr") ?: ""
+                    val proto = call.argument<String>("protocol") ?: ""
+                    background(result, "route") { V2Tun.explainRoute(net, addr, proto) }
+                }
+                // Swap the routing section of the running tunnel; returns an error text or null.
+                "updateRouting" -> result.success(V2Tun.updateRouting(call.argument<String>("routing") ?: "{}"))
                 "initialLink" -> { result.success(initial); initial = null }
                 "requestIgnoreBattery" -> {
                     val pm = getSystemService(PowerManager::class.java)
