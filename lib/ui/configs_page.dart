@@ -1,9 +1,13 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/link_parser.dart';
 import '../core/models.dart';
+import '../core/v2tun_config.dart';
 import '../state/app_state.dart';
 import 'import_page.dart';
 import 'share_page.dart';
@@ -35,7 +39,7 @@ class ConfigsPage extends StatelessWidget {
                 child: EmptyState(
                   icon: Icons.cloud_off_rounded,
                   title: 'No servers yet',
-                  body: 'Paste a vless://, vmess://, trojan://, ss://, ssh://, socks5://, http://, hysteria2:// or hy2:// link, import a subscription, or add a server by hand.',
+                  body: 'Paste a vless://, vmess://, trojan://, ss://, ssh://, socks5://, hysteria2:// or hy2:// link, import a subscription, or add a server by hand.',
                   action: FilledButton.icon(
                     onPressed: () => showAddSheet(context),
                     icon: const Icon(Icons.add_rounded),
@@ -85,7 +89,7 @@ class _ConfigTile extends StatelessWidget {
             height: 44,
             alignment: Alignment.center,
             decoration: BoxDecoration(color: alpha(isSel ? p.accent : p.dim, .16), borderRadius: BorderRadius.circular(14)),
-            child: Text(c.proto.label.substring(0, c.proto == Proto.shadowsocks ? 2 : 1).toUpperCase(), style: TextStyle(fontWeight: FontWeight.w800, color: isSel ? p.accent : p.dim, fontSize: 16)),
+            child: Text(c.proto.badge, style: TextStyle(fontWeight: FontWeight.w800, color: isSel ? p.accent : p.dim, fontSize: c.proto.badge.length > 2 ? 12.5 : 16)),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -97,7 +101,7 @@ class _ConfigTile extends StatelessWidget {
                 if (inFailover) Padding(padding: const EdgeInsets.only(left: 6), child: Icon(Icons.swap_horiz_rounded, size: 16, color: p.steel)),
               ]),
               const SizedBox(height: 3),
-              Text('${c.proto.label}${c.p('net') == '' || c.p('net') == 'tcp' ? '' : ' · ${c.p('net')}'}${c.p('security', 'none') == 'none' ? '' : ' · ${c.p('security')}'}  ·  ${c.locked ? (c.author.isEmpty ? 'Locked' : 'From ${c.author}') : c.host}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.dim, fontSize: 12)),
+              Text('${c.proto.label}${c.p('net') == '' || c.p('net') == 'tcp' ? '' : ' · ${c.p('net')}'}${c.p('security', 'none') == 'none' ? '' : ' · ${c.p('security')}'}${c.proto == Proto.ssh && c.p('hostKey').isNotEmpty ? ' · pinned' : ''}  ·  ${c.locked ? (c.author.isEmpty ? 'Locked' : 'From ${c.author}') : c.host}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: p.dim, fontSize: 12)),
             ]),
           ),
           if (c.note.isNotEmpty)
@@ -138,6 +142,18 @@ void showConfigMenu(BuildContext context, ServerConfig c) {
               s.setSetting('failoverIds', inFailover ? ids.where((x) => x != c.id).toList() : [...ids, c.id]);
             },
           ),
+        if (!c.locked && c.proto == Proto.ssh && c.p('hostKey').isNotEmpty)
+          ListTile(
+            leading: const Icon(Icons.key_off_rounded),
+            title: const Text('Forget pinned host key'),
+            subtitle: const Text('The next connection pins the key the server shows then'),
+            onTap: () {
+              Navigator.pop(ctx);
+              c.params.remove('hostKey');
+              s.upsert(c);
+              toast(context, 'Host key forgotten');
+            },
+          ),
         if (!c.locked) ListTile(
           leading: const Icon(Icons.copy_rounded),
           title: const Text('Copy plain link'),
@@ -145,7 +161,7 @@ void showConfigMenu(BuildContext context, ServerConfig c) {
             Navigator.pop(ctx);
             final l = LinkParser.toLink(c);
             if (l == null) {
-              toast(context, 'Profiles with a private key cannot be shared as a link.');
+              toast(context, 'This profile cannot be shared as a link (private key, payload, TLS SSH or HTTP proxy).');
             } else {
               Clipboard.setData(ClipboardData(text: l));
               toast(context, 'Link copied');
@@ -187,7 +203,7 @@ void showServerPicker(BuildContext context) {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                 selected: c.id == st.selectedId,
                 title: Text(c.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
-                subtitle: Text('${c.proto.label} · ${c.host}'),
+                subtitle: Text('${c.proto.label} · ${c.safeHost}'),
                 trailing: c.pingMs == null ? null : Pill(c.pingMs! < 0 ? 'Timeout' : '${c.pingMs} ms', color: pingColor(ctx.pal, c.pingMs)),
                 onTap: () {
                   st.select(c.id);
@@ -330,12 +346,17 @@ class _EditorState extends State<_Editor> {
   late String stage = widget.existing?.p('payloadStage', 'pre-tls') ?? 'pre-tls';
   late bool insecure = widget.existing?.p('allowInsecure') == '1';
 
+  List<String> presets = const [];
+  String? payloadError;
+  bool probing = false;
+  Timer? _debounce;
+
   static const keys = [
     'name', 'host', 'port', 'id', 'user', 'privateKey', 'passphrase', 'hostKey', 'method', 'aid', 'sni', 'fp', 'alpn', 'path', 'hostHdr',
     'flow', 'pbk', 'sid', 'serviceName', 'obfs', 'pin', 'upMbps', 'downMbps', 'payload', 'payloadHost', 'proxy', 'responseMap',
   ];
 
-  /// Protocols that carry a network / security choice (the library applies them to the whole non-Hysteria family).
+  /// Protocols that carry a network / security / payload choice (the library applies them to the non-Hysteria family).
   bool get _hasTransport => proto == Proto.vless || proto == Proto.vmess || proto == Proto.trojan || proto == Proto.ssh;
   bool get _userPass => proto == Proto.ssh || proto == Proto.socks5 || proto == Proto.http || proto == Proto.https;
   int get _defaultPort => switch (proto) {
@@ -361,10 +382,16 @@ class _EditorState extends State<_Editor> {
           },
         ),
     };
+    final bridge = context.read<AppState>().bridge;
+    bridge.payloadPresets().then((v) {
+      if (mounted) setState(() => presets = v.isEmpty ? const ['@connect', '@ssh-ws'] : v);
+    });
+    if (t['payload']!.text.isNotEmpty) _onPayloadChanged(t['payload']!.text);
   }
 
   @override
   void dispose() {
+    _debounce?.cancel();
     for (final c in t.values) {
       c.dispose();
     }
@@ -409,12 +436,69 @@ class _EditorState extends State<_Editor> {
         subtitle: const Text('Skips certificate checks. Only for servers you control.'),
       );
 
-  void _save() {
+  // ── library helpers: host key probe, payload validation and preview ──
+
+  void _onPayloadChanged(String v) {
+    _debounce?.cancel();
+    if (v.trim().isEmpty) {
+      setState(() => payloadError = null);
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 350), () async {
+      // The same text the config builder sends to the library.
+      final err = await context.read<AppState>().bridge.validatePayload(migratePayload(v).template);
+      if (mounted) setState(() => payloadError = err);
+    });
+  }
+
+  Future<void> _previewPayload() async {
+    final st = context.read<AppState>();
+    final tpl = migratePayload(t['payload']!.text).template;
+    final ph = t['payloadHost']!.text.trim();
+    final host = ph.isNotEmpty ? ph : (t['host']!.text.trim().isEmpty ? 'example.com' : t['host']!.text.trim());
+    final port = int.tryParse(t['port']!.text.trim()) ?? 22;
+    try {
+      final out = await st.bridge.previewPayload(tpl, host, port);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Payload preview'),
+          content: SingleChildScrollView(child: SelectableText(out, style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5, height: 1.4))),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
+        ),
+      );
+    } catch (e) {
+      if (mounted) toast(context, '$e');
+    }
+  }
+
+  Future<void> _fetchHostKey() async {
+    final c = _build();
+    if (c == null) return;
+    final st = context.read<AppState>();
+    setState(() => probing = true);
+    try {
+      final cfg = buildV2tunConfig(c, st.settings, forPing: true);
+      final fp = await st.bridge.probeHostKey(jsonEncode(cfg), timeoutSec: st.settings.get<int>('connectTimeout'));
+      if (!mounted) return;
+      t['hostKey']!.text = fp;
+      toast(context, 'Host key read. Check it against the server before saving.');
+    } catch (e) {
+      if (mounted) toast(context, 'Could not read the host key: $e');
+    } finally {
+      if (mounted) setState(() => probing = false);
+    }
+  }
+
+  // ── form -> profile ──
+
+  ServerConfig? _build() {
     final host = t['host']!.text.trim();
     final port = int.tryParse(t['port']!.text.trim());
     if (host.isEmpty || port == null) {
       toast(context, 'Enter a host and a valid port.');
-      return;
+      return null;
     }
     // Start from what the profile already has, so parameters this form does not show (mode, spx, ...) survive.
     final params = Map<String, String>.from(widget.existing?.params ?? const <String, String>{});
@@ -464,16 +548,14 @@ class _EditorState extends State<_Editor> {
       }
       if (net == 'grpc') put('serviceName');
       if (proto == Proto.vless) put('flow');
-      if (proto == Proto.ssh) {
-        put('payload');
-        put('payloadHost');
-        put('proxy');
-        put('responseMap');
-        if (sec == 'tls' && t['payload']!.text.trim().isNotEmpty) {
-          params['payloadStage'] = stage;
-        } else {
-          params.remove('payloadStage');
-        }
+      put('payload');
+      put('payloadHost');
+      put('proxy');
+      put('responseMap');
+      if (sec == 'tls' && t['payload']!.text.trim().isNotEmpty) {
+        params['payloadStage'] = stage;
+      } else {
+        params.remove('payloadStage');
       }
     }
     if (hy) {
@@ -493,7 +575,7 @@ class _EditorState extends State<_Editor> {
       params.remove('allowInsecure');
     }
 
-    final c = ServerConfig(
+    return ServerConfig(
       id: widget.existing?.id ?? ServerConfig.newId(),
       name: t['name']!.text.trim().isEmpty ? host : t['name']!.text.trim(),
       proto: proto,
@@ -503,8 +585,58 @@ class _EditorState extends State<_Editor> {
       favorite: widget.existing?.favorite ?? false,
       group: widget.existing?.group ?? '',
     );
+  }
+
+  void _save() {
+    if (payloadError != null) {
+      toast(context, 'Fix the payload first: $payloadError');
+      return;
+    }
+    final c = _build();
+    if (c == null) return;
     context.read<AppState>().upsert(c);
     Navigator.pop(context);
+  }
+
+  Widget _payloadSection() {
+    final p = context.pal;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 4),
+      Text('HTTP payload (optional)', style: TextStyle(color: p.dim, fontWeight: FontWeight.w700, fontSize: 12.5)),
+      const SizedBox(height: 8),
+      if (presets.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Wrap(spacing: 8, runSpacing: 4, children: [
+            for (final n in presets) ActionChip(label: Text(n), onPressed: () {
+              t['payload']!.text = n;
+              _onPayloadChanged(n);
+              setState(() {});
+            }),
+          ]),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: TextField(
+          controller: t['payload'],
+          minLines: 3,
+          maxLines: 3,
+          autocorrect: false,
+          onChanged: _onPayloadChanged,
+          decoration: InputDecoration(labelText: 'Payload or preset', errorText: payloadError, errorMaxLines: 3, filled: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none)),
+        ),
+      ),
+      if (t['payload']!.text.trim().isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(padding: const EdgeInsets.only(bottom: 12), child: OutlinedButton.icon(onPressed: payloadError == null ? _previewPayload : null, icon: const Icon(Icons.visibility_rounded, size: 18), label: const Text('Preview what is sent'))),
+        ),
+      _f('payloadHost', 'Payload host (blank = server host)'),
+      _f('proxy', 'HTTP proxy to send it through (host:port, optional)'),
+      _f('responseMap', 'Response override (e.g. 302=200, 3xx=200)'),
+      if (sec == 'tls') _chips('Send payload', const ['pre-tls', 'post-tls'], stage, (v) => stage = v),
+      _note('HTTP Injector style payloads, checked by the tunnel library. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a|b] [random=a|b] [ua]. Presets such as @connect and @ssh-ws are expanded by the library. Old [sni=…] and [rotate=a;b] spellings are converted, and [tls] / [plain] are replaced by the Security setting. With an HTTP proxy the connection goes to the proxy and the payload names the real server.'),
+    ]);
   }
 
   @override
@@ -534,8 +666,19 @@ class _EditorState extends State<_Editor> {
           _f('privateKey', 'Private key (PEM, optional)', lines: 4),
           _f('passphrase', 'Key passphrase', obscure: true),
           _note('Encrypted keys are not supported by the tunnel library yet. Use an unencrypted key.'),
-          _f('hostKey', 'Pinned host key (optional)', hint: 'SHA256:…'),
-          _note('Leave empty to trust the key on first use and refuse a changed one. A pinned key is checked on every connection.'),
+          _f('hostKey', 'Pinned host key', hint: 'SHA256:…'),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: OutlinedButton.icon(
+                onPressed: probing ? null : _fetchHostKey,
+                icon: probing ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.fingerprint_rounded, size: 18),
+                label: Text(probing ? 'Contacting the server…' : 'Fetch from server'),
+              ),
+            ),
+          ),
+          _note('The first connection pins the key the server shows (trust on first use), and the library refuses a different key afterwards. Fetch it here to check it before you connect, or clear the field to pin again.'),
         ] else if (proto == Proto.vless || proto == Proto.vmess)
           _f('id', 'UUID')
         else if (proto != Proto.socks4 && !_userPass)
@@ -547,24 +690,14 @@ class _EditorState extends State<_Editor> {
           _chips('Transport', nets, net, (v) => net = v),
           _chips('Security', ssh ? const ['none', 'tls'] : const ['none', 'tls', 'reality'], sec, (v) => sec = v),
           if (sec != 'none') _f('sni', 'SNI (blank = server host)'),
-          if (sec != 'none') _f('fp', 'Fingerprint (chrome, firefox…)'),
+          if (sec != 'none') _f('fp', 'Fingerprint (chrome, firefox, safari, ios, android, edge, random)'),
           if (sec == 'tls') _f('alpn', 'ALPN (comma separated, optional)'),
           if (sec == 'tls') _insecureSwitch(),
           if (sec == 'reality') ...[_f('pbk', 'Reality public key'), _f('sid', 'Reality short ID')],
           if (net == 'ws' || net == 'xhttp' || net == 'httpupgrade' || net == 'h2') ...[_f('path', 'Path'), _f('hostHdr', 'Host header')],
           if (net == 'grpc') _f('serviceName', 'gRPC service name'),
           if (proto == Proto.vless) _f('flow', 'Flow (xtls-rprx-vision)'),
-          if (ssh) ...[
-            const SizedBox(height: 4),
-            Text('HTTP payload (optional)', style: TextStyle(color: p.dim, fontWeight: FontWeight.w700, fontSize: 12.5)),
-            const SizedBox(height: 8),
-            _f('payload', 'Payload', lines: 3),
-            _f('payloadHost', 'Payload host (blank = server host)'),
-            _f('proxy', 'HTTP proxy to send it through (host:port, optional)'),
-            _f('responseMap', 'Response override (e.g. 302=200, 3xx=200)'),
-            if (sec == 'tls') _chips('Send payload', const ['pre-tls', 'post-tls'], stage, (v) => stage = v),
-            _note('HTTP Injector style payloads. Placeholders: [host] [port] [host_port] [protocol] [method] [crlf] [cr] [lf] [split] [instant_split] [delay_split] [rotate=a|b] [ua]. Old [sni=…] and [rotate=a;b] spellings are converted, and [tls] / [plain] are replaced by the Security setting. Empty payload uses plain SSH. A successful reply, or 101 Switching Protocols with a matching Upgrade, establishes the tunnel.'),
-          ],
+          _payloadSection(),
         ],
         if (hy) ...[
           _f('sni', 'SNI (blank = server host)'),
